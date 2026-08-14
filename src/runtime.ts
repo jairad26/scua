@@ -8,17 +8,27 @@ export interface StoredState<T> {
 }
 
 export class StaleResourceStateError extends Error {
-	constructor(readonly resourceKey: string, readonly expectedEpoch: number, readonly actualEpoch: number) {
+	readonly resourceKey: string;
+	readonly expectedEpoch: number;
+	readonly actualEpoch: number;
+
+	constructor(resourceKey: string, expectedEpoch: number, actualEpoch: number) {
 		super(`State is stale for ${resourceKey}: expected epoch ${expectedEpoch}, current epoch ${actualEpoch}.`);
 		this.name = "StaleResourceStateError";
+		this.resourceKey = resourceKey;
+		this.expectedEpoch = expectedEpoch;
+		this.actualEpoch = actualEpoch;
 	}
 }
 
 /** Bounded insertion-ordered store for immutable agent-facing observations. */
 export class StateStore<T> {
 	private readonly records = new Map<string, StoredState<T>>();
+	private readonly limit: number;
 
-	constructor(private readonly limit = 128) {}
+	constructor(limit = 128) {
+		this.limit = limit;
+	}
 
 	create(resourceKey: string, epoch: number, value: T): StoredState<T> {
 		const record = { stateId: randomUUID(), resourceKey, epoch, value };

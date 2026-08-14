@@ -1180,6 +1180,7 @@ async function helperAct(
 	headless: boolean,
 	signal?: AbortSignal,
 ): Promise<ExecutionTrace> {
+	const allowForegroundFallback = !headless && getComputerUseConfig().foreground_fallback;
 	const checked = (candidate: HelperActResult): HelperActResult => {
 		if (!candidate || !["worked", "didnt", "unknown"].includes(candidate.outcome)) {
 			throw new Error("Helper act returned an invalid result without an outcome.");
@@ -1188,7 +1189,7 @@ async function helperAct(
 	};
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
-	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
+	if ((action.usesCurrentFocus || action.needsForeground) && allowForegroundFallback) {
 		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = false;
@@ -1197,7 +1198,7 @@ async function helperAct(
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
 		const result = checked(await currentPlatformBackend.act(helperActRequest(target, action, initialPolicy), { signal, timeoutMs }));
-		if (canRetryInForeground(action, result.outcome, headless)) {
+		if (allowForegroundFallback && canRetryInForeground(action, result.outcome, headless)) {
 			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 			const trace = executionTraceFromAct(foreground, "foreground");
 			trace.backgroundFirst = true;
@@ -1211,7 +1212,7 @@ async function helperAct(
 		return trace;
 	} catch (error) {
 		const code = (error as Error & { code?: string })?.code;
-		if (code !== "foreground_required" || headless) throw error;
+		if (code !== "foreground_required" || !allowForegroundFallback) throw error;
 		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
 		const trace = executionTraceFromAct(foreground, "foreground");
 		trace.backgroundFirst = true;

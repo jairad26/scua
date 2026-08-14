@@ -12,6 +12,7 @@
   },
   "include": [
     "extensions/**/*.ts",
+    "mcp/**/*.ts",
     "src/**/*.ts"
   ]
 }

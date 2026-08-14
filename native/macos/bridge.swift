@@ -1940,7 +1940,7 @@ final class Bridge {
 				policy != "ax_only",
 				["press", "click", "moveMouse", "scroll", "drag"].contains(action)
 			else { return }
-			Task { @MainActor in AgentCursor.shared.animate(to: point, above: record.windowId) }
+			Task { @MainActor in AgentCursor.animate(resource: "desktop-pid:\(pid)", to: point, above: record.windowId) }
 		}
 
 		func focusTargetForPhysicalInput() {

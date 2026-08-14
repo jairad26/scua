@@ -8,6 +8,7 @@ struct AgentCursorTests {
     static func main() {
         testMotionLifecycle()
         testOverlayLifecycle()
+        testResourceCursorIsolation()
     }
 
     @MainActor
@@ -81,7 +82,7 @@ struct AgentCursorTests {
         expect(firstWindow.contentView != nil, "a stale timeout should not release the current view")
 
         scheduler.fire(1)
-        expect(!AgentCursorRenderer.shared.isAnimating, "the current timeout should stop rendering")
+        expect(!cursor.isAnimating, "the current timeout should stop rendering")
         expect(!firstWindow.isVisible, "the current timeout should hide the overlay")
         expect(firstWindow.contentView == nil, "the current timeout should release the view tree")
 
@@ -95,6 +96,28 @@ struct AgentCursorTests {
         scheduler.fire(2)
         expect(!recreatedWindow.isVisible, "the recreated overlay should retain the idle lifecycle")
         expect(recreatedWindow.contentView == nil, "the recreated overlay should release its view tree")
+    }
+
+    @MainActor
+    private static func testResourceCursorIsolation() {
+        AgentCursor.resetResourceCursors()
+        let application = NSApplication.shared
+        let existingWindows = Set(application.windows.map(ObjectIdentifier.init))
+
+        AgentCursor.animate(resource: "desktop-pid:101", to: CGPoint(x: 300, y: 300), above: 0)
+        AgentCursor.animate(resource: "desktop-pid:202", to: CGPoint(x: 700, y: 500), above: 0)
+
+        let resourceWindows = application.windows.filter {
+            !existingWindows.contains(ObjectIdentifier($0)) && $0.isVisible
+        }
+        expect(resourceWindows.count == 2, "independent resources should render independent cursor windows")
+        expect(AgentCursor.visibleResourceCount == 2, "independent resources should remain visible concurrently")
+
+        AgentCursor.animate(resource: "desktop-pid:101", to: CGPoint(x: 400, y: 400), above: 0)
+        expect(AgentCursor.visibleResourceCount == 2, "a repeated resource should reuse its cursor")
+
+        AgentCursor.resetResourceCursors()
+        expect(AgentCursor.visibleResourceCount == 0, "resource cursor reset should close every overlay")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {

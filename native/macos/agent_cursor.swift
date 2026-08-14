@@ -6,15 +6,66 @@ import SwiftUI
 final class AgentCursor {
     typealias IdleHideScheduler = @MainActor (@escaping @MainActor () -> Void) -> Task<Void, Never>
 
-    static let shared = AgentCursor(scheduleIdleHide: scheduleDefaultIdleHide)
+    private static var resourceCursors: [String: AgentCursor] = [:]
 
     private var overlay: AgentCursorOverlayWindow?
     private var idleHideTask: Task<Void, Never>?
     private var idleGeneration: UInt = 0
     private let scheduleIdleHide: IdleHideScheduler
+    private let renderer: AgentCursorRenderer
+    private let tint: NSColor
 
-    init(scheduleIdleHide: @escaping IdleHideScheduler) {
+    init(
+        scheduleIdleHide: @escaping IdleHideScheduler,
+        tint: NSColor = NSColor(red: 1, green: 0x78 / 255, blue: 0x18 / 255, alpha: 1)
+    ) {
         self.scheduleIdleHide = scheduleIdleHide
+        self.renderer = AgentCursorRenderer()
+        self.tint = tint
+    }
+
+    static func animate(resource: String, to point: CGPoint, above windowId: UInt32) {
+        if resourceCursors.count >= 64 {
+            resourceCursors = resourceCursors.filter { $0.value.overlay?.isVisible == true }
+        }
+        let cursor = resourceCursors[resource] ?? {
+            let created = AgentCursor(scheduleIdleHide: scheduleDefaultIdleHide, tint: tint(for: resource))
+            resourceCursors[resource] = created
+            return created
+        }()
+        cursor.animate(to: point, above: windowId)
+    }
+
+    static var visibleResourceCount: Int {
+        resourceCursors.values.filter { $0.overlay?.isVisible == true }.count
+    }
+
+    static func resetResourceCursors() {
+        for cursor in resourceCursors.values {
+            cursor.idleHideTask?.cancel()
+            cursor.renderer.cancelAnimation()
+            cursor.overlay?.orderOut(nil)
+            cursor.overlay?.contentView = nil
+            cursor.overlay?.close()
+            cursor.overlay = nil
+        }
+        resourceCursors.removeAll()
+    }
+
+    var isAnimating: Bool {
+        renderer.isAnimating
+    }
+
+    private static func tint(for resource: String) -> NSColor {
+        let hash = resource.utf8.reduce(UInt64(14_695_981_039_346_656_037)) {
+            ($0 ^ UInt64($1)) &* 1_099_511_628_211
+        }
+        return NSColor(
+            calibratedHue: CGFloat(hash % 360) / 360,
+            saturation: 0.78,
+            brightness: 1,
+            alpha: 1
+        )
     }
 
     func animate(to point: CGPoint, above windowId: UInt32) {
@@ -26,7 +77,6 @@ final class AgentCursor {
         if !window.isVisible { window.orderFrontRegardless() }
         window.order(.above, relativeTo: Int(windowId))
 
-        let renderer = AgentCursorRenderer.shared
         if renderer.position.x < -100 {
             let frame = NSScreen.main?.frame ?? .zero
             renderer.setInitialPosition(CGPoint(
@@ -66,7 +116,7 @@ final class AgentCursor {
             backing: .buffered,
             defer: false
         )
-        window.contentView = NSHostingView(rootView: AgentCursorView())
+        window.contentView = NSHostingView(rootView: AgentCursorView(renderer: renderer, tint: tint))
         overlay = window
         return window
     }
@@ -91,7 +141,13 @@ private final class AgentCursorOverlayWindow: NSWindow {
 
 @MainActor
 private struct AgentCursorView: View {
-    @Bindable private var renderer = AgentCursorRenderer.shared
+    @Bindable private var renderer: AgentCursorRenderer
+    private let tint: Color
+
+    init(renderer: AgentCursorRenderer, tint: NSColor) {
+        self.renderer = renderer
+        self.tint = Color(nsColor: tint)
+    }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !renderer.isAnimating)) { context in
@@ -108,7 +164,7 @@ private struct AgentCursorView: View {
         let point = renderer.position
         guard point.x > -100 else { return }
 
-        let bloom = Color(nsColor: NSColor(red: 1, green: 0x78 / 255, blue: 0x18 / 255, alpha: 1))
+        let bloom = tint
         let radius: CGFloat = 22
         graphics.fill(
             Path(ellipseIn: CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)),
@@ -146,9 +202,9 @@ private struct AgentCursorView: View {
             transformed,
             with: .linearGradient(
                 Gradient(colors: [
-                    Color(red: 1, green: 0xD0 / 255, blue: 0x76 / 255),
-                    Color(red: 1, green: 0x78 / 255, blue: 0x18 / 255),
-                    Color(red: 0xE8 / 255, green: 0x4A / 255, blue: 0x0C / 255),
+                    tint.opacity(0.55),
+                    tint,
+                    tint.opacity(0.8),
                 ]),
                 startPoint: CGPoint(x: point.x + 14, y: point.y - 9),
                 endPoint: CGPoint(x: point.x - 8, y: point.y + 9)

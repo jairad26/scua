@@ -1,0 +1,39 @@
+{
+  "name": "scua",
+  "version": "0.1.0+codex.20260814211552",
+  "description": "State-scoped semantic computer use for desktop applications and browser-page roots.",
+  "author": {
+    "name": "Jair Radhakrishnan",
+    "url": "https://github.com/jairad26"
+  },
+  "homepage": "https://github.com/jairad26/scua",
+  "repository": "https://github.com/jairad26/scua",
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "semantic-ui",
+    "accessibility",
+    "macos",
+    "codex"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "SCUA",
+    "shortDescription": "Semantic computer use without input takeover.",
+    "longDescription": "Give Codex a generic, state-scoped UI contract backed by native accessibility, immutable cached observations, verified actions, per-resource scheduling, and independent visual agent cursors.",
+    "developerName": "Jair Radhakrishnan",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/jairad26/scua",
+    "defaultPrompt": [
+      "Use SCUA to complete this task in a desktop app.",
+      "Inspect the available UI roots and operate the right one.",
+      "Use SCUA without taking over my cursor or keyboard."
+    ],
+    "brandColor": "#FF7818"
+  }
+}

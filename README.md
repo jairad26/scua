@@ -1,4 +1,61 @@
-# pi-computer-use
+# SCUA
+
+SCUA is a Codex plugin for generic, semantic-first computer use. It is built as
+a maintained fork of
+[`injaneity/pi-computer-use`](https://github.com/injaneity/pi-computer-use),
+whose cross-platform state engine and native helpers remain the foundation.
+
+Codex receives one lowest-common-denominator contract for every UI root:
+
+```text
+find roots -> observe immutable state -> query cached state -> act -> verify successor state
+```
+
+The MCP surface intentionally contains no application-specific tools and never
+silently moves a task from one application to another. Desktop Accessibility
+and browser CDP are internal grounding backends behind the same root, state,
+element, and action model.
+
+## Codex tools
+
+- `find_roots`
+- `observe_ui`
+- `search_ui`
+- `expand_ui`
+- `inspect_ui`
+- `act_ui`
+- `read_text`
+- `wait_for`
+
+SCUA's launcher enables visual agent cursors but disables foreground fallback.
+It may use semantic Accessibility actions or process-targeted background input;
+it must not activate an app, move the physical pointer, or take over the global
+keyboard to rescue a failed action. If a selected application cannot complete
+an action in the background, the action fails honestly.
+
+Independent application processes and browser-page targets have separate
+scheduling lanes. The macOS helper also maintains a distinct click-through
+cursor overlay per active resource, so concurrent work can remain visible
+without sharing one animated cursor.
+
+See [SCUA architecture](docs/scua-architecture.md) for the fork-specific design
+and search decisions.
+
+## Local development
+
+```sh
+npm install
+npm test
+./scripts/run-mcp.sh
+```
+
+The first install places a stably signed helper at
+`~/Applications/pi-computer-use.app`. macOS requires Accessibility and Screen
+Recording permission for that helper. The committed `.codex-plugin/plugin.json`
+and `.mcp.json` make the repository directly installable as a local Codex
+plugin.
+
+## Upstream engine
 
 <p align="center">
   <img src="./assets/logo/logo3.png" width="50%" alt="pi-computer-use">

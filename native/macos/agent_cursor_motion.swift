@@ -6,8 +6,6 @@ import Observation
 @Observable
 @MainActor
 final class AgentCursorRenderer {
-    static let shared = AgentCursorRenderer()
-
     private(set) var position = CGPoint(x: -200, y: -200)
     private(set) var heading: Double = .pi / 4
     private(set) var isAnimating = false

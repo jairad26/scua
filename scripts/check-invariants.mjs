@@ -197,7 +197,9 @@ check("INV-17 macOS agent cursor stays native, configurable, and background-only
 	assert(swift.includes('policy != "ax_only"'), "strict-headless actions can display the agent cursor");
 	assert(swift.includes('request["cursorOverlay"] as? Bool ?? true'), "native helper ignores the cursor overlay flag");
 	assert(swift.includes("app.processIdentifier != getpid()"), "helper overlay can leak into root discovery");
-	assert(swift.includes("AgentCursor.shared.animate(to:"), "native grounded actions do not drive the agent cursor");
+	assert(swift.includes("AgentCursor.animate(resource:"), "native grounded actions do not drive a resource-scoped agent cursor");
+	assert(agentCursorSwift.includes("resourceCursors: [String: AgentCursor]"), "agent cursor remains a process-wide singleton");
+	assert(!agentCursorSwift.includes("AgentCursorRenderer.shared"), "independent resources still share one cursor renderer");
 	assert(!swift.includes("completed.wait()") && !swift.includes("agentCursorLock"), "agent cursor can delay action delivery");
 	assert(agentCursorSwift.includes("paused: !renderer.isAnimating"), "agent cursor timeline continues rendering while idle");
 });
