@@ -2,36 +2,31 @@ import CoreGraphics
 import Foundation
 import Observation
 
-/// Main-actor Dubins-path animation state consumed by the SwiftUI overlay.
+/// Main-actor, time-based path animation consumed by the AppKit overlay.
+///
+/// Time-based interpolation keeps every cursor tied to the display clock even
+/// when the main run loop briefly stalls. A smoothstep arrival deliberately
+/// lands without the old post-target spring, which looked like pointer jitter.
 @Observable
 @MainActor
 final class AgentCursorRenderer {
-    static let shared = AgentCursorRenderer()
-
     private(set) var position = CGPoint(x: -200, y: -200)
     private(set) var heading: Double = .pi / 4
     private(set) var isAnimating = false
 
     private var path: PlannedPath?
-    private var spring: Spring?
-    private var distanceSoFar: Double = 0
-    private var lastFrameTime: CFTimeInterval?
-    private var springTarget: (point: CGPoint, heading: Double)?
+    private var animationStartedAt: CFTimeInterval?
+    private var animationDuration: CFTimeInterval = 0
 
     func moveTo(point clickPoint: CGPoint) {
         let endAngle = Double.pi / 4
-        let targetPoint = CGPoint(
-            x: clickPoint.x + CGFloat(cos(endAngle) * 16),
-            y: clickPoint.y + CGFloat(sin(endAngle) * 16)
-        )
+        let targetPoint = clickPoint
         path = planPath(
             x0: Double(position.x), y0: Double(position.y), th0: heading + .pi,
             x1: Double(targetPoint.x), y1: Double(targetPoint.y), th1: endAngle + .pi,
             R: 80, endVisualHeading: endAngle, targetPoint: targetPoint)
-        spring = nil
-        springTarget = nil
-        distanceSoFar = 0
-        lastFrameTime = nil
+        animationStartedAt = nil
+        animationDuration = Self.duration(for: path?.length ?? 0)
         isAnimating = true
     }
 
@@ -42,75 +37,42 @@ final class AgentCursorRenderer {
 
     func cancelAnimation() {
         path = nil
-        spring = nil
-        springTarget = nil
-        distanceSoFar = 0
-        lastFrameTime = nil
+        animationStartedAt = nil
+        animationDuration = 0
         isAnimating = false
     }
 
     func tick(now: CFTimeInterval) {
-        guard isAnimating else { return }
-        let previous = lastFrameTime ?? now
-        let dt = min(0.05, now - previous)
-        lastFrameTime = now
+        guard isAnimating, let path else { return }
+        if animationStartedAt == nil { animationStartedAt = now }
+        let elapsed = max(0, now - (animationStartedAt ?? now))
+        let progress = min(1, elapsed / max(animationDuration, 0.001))
+        let eased = smootherstep(progress)
 
-        if let path {
-            let progress = min(1.0, distanceSoFar / max(path.length, 1))
-            let profile = 16 * progress * progress * (1 - progress) * (1 - progress)
-            let minimumSpeed = progress < 0.5 ? 300.0 : 200.0
-            let speed = minimumSpeed + (900 - minimumSpeed) * profile
-            distanceSoFar += speed * dt
-
-            if distanceSoFar >= path.length {
-                let endState = path.sample(at: path.length)
-                spring = Spring(
-                    ox: 0,
-                    oy: 0,
-                    vx: cos(endState.heading) * speed * 0.8,
-                    vy: sin(endState.heading) * speed * 0.8
-                )
-                springTarget = (path.targetPoint, path.endVisualHeading)
-                position = path.targetPoint
-                heading = path.endVisualHeading
-                self.path = nil
-                distanceSoFar = 0
-            } else {
-                let state = path.sample(at: distanceSoFar)
-                position = CGPoint(x: state.x, y: state.y)
-                heading = rotateToward(current: heading, desired: state.heading + .pi, maxStep: 14 * dt)
-            }
-        } else if var spring, let target = springTarget {
-            let substep = dt / 4
-            for _ in 0..<4 {
-                spring.vx += (-400 * spring.ox - 17 * spring.vx) * substep
-                spring.vy += (-400 * spring.oy - 17 * spring.vy) * substep
-                spring.ox += spring.vx * substep
-                spring.oy += spring.vy * substep
-            }
-            position = CGPoint(x: target.point.x + CGFloat(spring.ox), y: target.point.y + CGFloat(spring.oy))
-            heading = target.heading
-            if hypot(spring.ox, spring.oy) < 0.3 && hypot(spring.vx, spring.vy) < 2 {
-                position = target.point
-                self.spring = nil
-                springTarget = nil
-                lastFrameTime = nil
-                isAnimating = false
-            } else {
-                self.spring = spring
-            }
+        if progress >= 1 {
+            position = path.targetPoint
+            heading = path.endVisualHeading
+            self.path = nil
+            animationStartedAt = nil
+            isAnimating = false
+            return
         }
+
+        let state = path.sample(at: path.length * eased)
+        position = CGPoint(x: state.x, y: state.y)
+        heading = state.heading + .pi
     }
 
-    private func rotateToward(current: Double, desired: Double, maxStep: Double) -> Double {
-        var difference = desired - current
-        while difference > .pi { difference -= 2 * .pi }
-        while difference < -.pi { difference += 2 * .pi }
-        return current + max(-maxStep, min(maxStep, difference))
+    private static func duration(for pathLength: Double) -> CFTimeInterval {
+        // Short hops remain readable; long trips never become sluggish.
+        min(0.62, max(0.18, 0.14 + pathLength / 2_400))
     }
 }
 
-private struct Spring { var ox, oy, vx, vy: Double }
+private func smootherstep(_ value: Double) -> Double {
+    let t = min(1, max(0, value))
+    return t * t * t * (t * (t * 6 - 15) + 10)
+}
 
 struct DubinsPlannedPath {
     enum Kind { case dubins, linear }
@@ -216,11 +178,13 @@ private func planPath(x0: Double, y0: Double, th0: Double,
                       x1: Double, y1: Double, th1: Double,
                       R: Double, endVisualHeading: Double,
                       targetPoint: CGPoint) -> PlannedPath {
+    let directDistance = max(1, hypot(x1 - x0, y1 - y0))
     if let p = planDubins(x0: x0, y0: y0, th0: th0, x1: x1, y1: y1, th1: th1,
-                          R: R, endVisualHeading: endVisualHeading, targetPoint: targetPoint) {
+                          R: R, endVisualHeading: endVisualHeading, targetPoint: targetPoint),
+       p.length <= max(directDistance * 1.75, directDistance + 240) {
         return p
     }
-    let D = max(1, hypot(x1 - x0, y1 - y0))
+    let D = directDistance
     return PlannedPath(kind: .linear, length: D, endVisualHeading: endVisualHeading,
                        targetPoint: targetPoint, x0: x0, y0: y0, th0: th0, R: R,
                        seg1: 0, seg2: 0, seg3: 0, types: [], x1: x1, y1: y1, th1: th1)

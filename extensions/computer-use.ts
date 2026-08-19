@@ -71,6 +71,7 @@ const observeTool = defineTool({
 	],
 	parameters: Type.Object({
 		root: Type.Optional(Type.String({ description: "Exact @r ref issued by find_roots" })),
+		stateId: Type.Optional(Type.String({ description: "Prior state to refresh while preserving stable @e identities" })),
 		mode: Type.Optional(Type.Union([Type.Literal("semantic"), Type.Literal("visual"), Type.Literal("fused")], { description: "Observation mode, default fused" })),
 	}),
 	execute: executeObserve,
@@ -114,7 +115,7 @@ const actTool = defineTool({
 	description: "Perform one or more precisely targeted checked actions and return the successor state.",
 	promptSnippet: "Pass dependent click/type steps together and use expect for observable completion.",
 	promptGuidelines: ["After clicking an editable region, omit ref from typeText/keypress so input follows the established focus."],
-	parameters: Type.Object({ stateId, expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
+	parameters: Type.Object({ stateId, guards: Type.Optional(Type.Array(Type.Object(conditionProperties), { minItems: 1, maxItems: 8 })), expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
 
@@ -172,6 +173,7 @@ function formatConfigStatus(): string {
 		`managed_browser: ${loaded.config.managed_browser}`,
 		`headless: ${loaded.config.headless ? "enabled" : "disabled"}`,
 		`cursor_overlay: ${loaded.config.cursor_overlay ? "enabled" : "disabled"}`,
+		`execution_mode: ${loaded.config.execution_mode}`,
 		"",
 		"Sources:",
 		...loaded.sources.map((source) => `- ${source.path}: ${source.error ? `error: ${source.error}` : source.exists ? "loaded" : "not found"}`),

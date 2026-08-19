@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url);
-const files = ["extensions/computer-use.ts"];
+const files = ["extensions/computer-use.ts", "mcp/tool-catalog.ts"];
 const failures = [];
 
 for (const file of files) {

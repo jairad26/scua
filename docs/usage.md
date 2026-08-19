@@ -17,6 +17,7 @@ The normal loop is:
 | `expand_ui` | Show local outline context for one ref. |
 | `inspect_ui` | Show fields, rects, actions, and evidence for one ref. |
 | `act_ui` | Perform checked actions and return the resulting saved state, showing its changes or a full view when needed. |
+| `execute_plan` | MCP-only: execute a guarded dependency DAG of ordinary `act_ui` transactions with bounded parallelism and localized recovery. |
 | `read_text` | Read fixed pages from state-owned `@e` text or immutable `@o` output. |
 | `wait_for` | Wait for a precise, optionally scoped condition. |
 | `launch_browser` | Start a managed CDP browser and return its observed page state. |
@@ -99,6 +100,56 @@ act_ui({
 ```
 
 The runtime prefers background semantics when they are credible, verifies the result, and escalates side-effect-free failed keyboard input to foreground delivery automatically. Ambiguous pointer actions are never replayed blindly.
+
+### Adaptive action plans
+
+An external orchestrator can avoid one model round trip per action by sending a
+small dependency graph to the MCP coordinator. Every node still uses the
+ordinary generic action and condition contracts:
+
+```ts
+execute_plan({
+  planId: "prepare-and-send",
+  maxConcurrency: 4,
+  nodes: [
+    {
+      id: "draft-note",
+      stateId: notesState,
+      guards: [{ ref: "@e12", role: "textbox" }],
+      actions: [{ action: "setText", ref: "@e12", text: "Draft" }],
+      expect: { ref: "@e12", value: "Draft" }
+    },
+    {
+      id: "prepare-message",
+      stateId: slackState,
+      guards: [{ ref: "@e7", role: "textbox" }],
+      actions: [{ action: "setText", ref: "@e7", text: "Ready" }],
+      expect: { ref: "@e7", value: "Ready" }
+    },
+    {
+      id: "save-note",
+      dependsOn: ["draft-note"],
+      stateFrom: "draft-note",
+      guards: [{ ref: "@e18", text: "Save" }],
+      actions: [{ action: "press", ref: "@e18" }],
+      expect: { text: "Saved" }
+    }
+  ]
+})
+```
+
+Ready nodes on independent resource lanes overlap. `stateFrom` consumes the
+successful predecessor's immutable successor state. Every node must provide at
+least one guard that was true in its base state; SCUA checks those guards again
+while holding the resource lease and before advancing its epoch. If the user,
+application, or another actor changed the relevant UI, no action is admitted.
+Only that definitely-undelivered node may re-observe and retry, at most twice
+by default and within 2.5 seconds. Failed descendants are blocked, unrelated
+branches continue, and any uncertain delivery fails closed without replay.
+
+Plans are limited to 64 nodes and 32 concurrently running nodes. They are an
+MCP orchestration primitive, so the direct Pi extension surface remains the
+smaller observe/query/`act_ui` loop.
 
 ### Successor views
 

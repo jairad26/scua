@@ -348,6 +348,46 @@ async function helperHasAdhocSignature() {
 	return /Signature=adhoc/i.test(output);
 }
 
+async function helperSignatureIsValid(appPath = helperAppPath) {
+	return await execFile("codesign", ["--verify", "--deep", "--strict", appPath])
+		.then(() => true, () => false);
+}
+
+async function stageLocalHelperApp(sourcePath, infoPlist, sourceHash) {
+	const stagingPath = `${helperAppPath}.staging-${process.pid}-${Date.now()}`;
+	try {
+		await fs.mkdir(path.join(stagingPath, "Contents", "MacOS"), { recursive: true });
+		await fs.mkdir(path.join(stagingPath, "Contents", "Resources"), { recursive: true });
+		const stagedExecutablePath = path.join(stagingPath, "Contents", "MacOS", "bridge");
+		await fs.copyFile(sourcePath, stagedExecutablePath);
+		await fs.chmod(stagedExecutablePath, 0o755);
+		await fs.writeFile(path.join(stagingPath, "Contents", "Info.plist"), infoPlist);
+		await fs.writeFile(path.join(stagingPath, "Contents", "Resources", "source.sha256"), `${sourceHash}\n`);
+		await signHelper(stagingPath, helperBundleId);
+		await execFile("codesign", ["--verify", "--deep", "--strict", stagingPath]);
+		return stagingPath;
+	} catch (error) {
+		await fs.rm(stagingPath, { force: true, recursive: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+async function replaceLocalHelperApp(stagingPath) {
+	const backupPath = `${helperAppPath}.backup-${process.pid}-${Date.now()}`;
+	const hadExisting = await exists(helperAppPath);
+	try {
+		if (hadExisting) await fs.rename(helperAppPath, backupPath);
+		await fs.rename(stagingPath, helperAppPath);
+		await fs.rm(backupPath, { force: true, recursive: true });
+	} catch (error) {
+		if (!(await exists(helperAppPath)) && await exists(backupPath)) {
+			await fs.rename(backupPath, helperAppPath).catch(() => undefined);
+		}
+		await fs.rm(stagingPath, { force: true, recursive: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
 async function registerHelperApp() {
 	const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 	if (!(await exists(lsregister))) return;
@@ -407,18 +447,16 @@ async function installHelperApp(sourcePath) {
 	const sourceHash = createHash("sha256").update(sourceExecutable).digest("hex");
 	const existingSourceHash = await fs.readFile(helperSourceHashPath, "utf8").catch(() => undefined);
 	const existingInfoPlist = await fs.readFile(infoPlistPath, "utf8").catch(() => undefined);
-	if (existingSourceHash?.trim() === sourceHash && existingInfoPlist === infoPlist) {
+	const samePayload = existingSourceHash?.trim() === sourceHash && existingInfoPlist === infoPlist;
+	if (samePayload && await helperSignatureIsValid()) {
 		// If a real signing identity is available, upgrade older ad-hoc installs
 		// in place so local builds have a consistent identity. macOS may still
 		// require permission review after native code changes.
 		const signingIdentity = process.env.PI_COMPUTER_USE_NO_SIGN === "1" ? "-" : await resolveCodeSignIdentity();
-		if (signingIdentity !== "-" && await helperHasAdhocSignature()) {
-			await signHelper(helperAppPath, helperBundleId);
+		if (!(signingIdentity !== "-" && await helperHasAdhocSignature())) {
 			await registerHelperApp();
-			return true;
+			return false;
 		}
-		await registerHelperApp();
-		return false;
 	}
 
 	const signingIdentity = process.env.PI_COMPUTER_USE_NO_SIGN === "1" ? "-" : await resolveCodeSignIdentity();
@@ -426,13 +464,8 @@ async function installHelperApp(sourcePath) {
 		throw new Error("Refusing to replace an installed helper with an ad-hoc signed rebuild because macOS may reset Accessibility/Screen Recording grants. Use a pre-signed helper app, install a Developer ID identity, or set PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE=1 for local development.");
 	}
 
-	await fs.mkdir(path.dirname(helperAppExecutablePath), { recursive: true });
-	await fs.mkdir(path.dirname(helperSourceHashPath), { recursive: true });
-	await fs.copyFile(sourcePath, helperAppExecutablePath);
-	await fs.chmod(helperAppExecutablePath, 0o755);
-	await fs.writeFile(infoPlistPath, infoPlist);
-	await fs.writeFile(helperSourceHashPath, `${sourceHash}\n`);
-	await signHelper(helperAppPath, helperBundleId);
+	const stagingPath = await stageLocalHelperApp(sourcePath, infoPlist, sourceHash);
+	await replaceLocalHelperApp(stagingPath);
 	await registerHelperApp();
 	return true;
 }

@@ -32,7 +32,7 @@ export interface EvaluateBrowserParams {
 	expression: string;
 }
 
-export interface ObserveParams extends ObserveTargetParams {
+export interface ObserveParams extends ObserveTargetParams, StateTargetParams {
 	mode?: "semantic" | "visual" | "fused";
 	/** Internal capture override; not part of the model-facing schema. */
 	readText?: "auto" | "always" | "never";
@@ -79,7 +79,37 @@ export interface UiAction {
 
 export interface ActParams extends StateTargetParams {
 	actions: UiAction[];
+	/** Live predicates checked while the resource lease is held and before its
+	 * epoch advances. A failed guard proves that no action was delivered. */
+	guards?: UiCondition[];
 	expect?: UiCondition;
+}
+
+export interface ActionPlanRetryPolicy {
+	maxAttempts?: number;
+	budgetMs?: number;
+}
+
+export interface ActionPlanNode {
+	id: string;
+	dependsOn?: string[];
+	/** Use one exact initial state, or inherit the successor state of another
+	 * node through stateFrom. Exactly one is required. */
+	stateId?: string;
+	stateFrom?: string;
+	actions: UiAction[];
+	guards?: UiCondition[];
+	expect?: UiCondition;
+	conflictPolicy?: "refresh" | "abort";
+	retry?: ActionPlanRetryPolicy;
+	/** Unknown delivery evidence is fail-closed unless explicitly accepted. */
+	acceptUnknown?: boolean;
+}
+
+export interface ExecutePlanParams {
+	planId?: string;
+	nodes: ActionPlanNode[];
+	maxConcurrency?: number;
 }
 
 export interface ReadTextParams extends StateTargetParams {

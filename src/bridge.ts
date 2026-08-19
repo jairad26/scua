@@ -1,24 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpClickForContext, cdpDragForContext, cdpEvaluateForContext, cdpKeypressForContext, cdpMouseForContext, cdpNavigateContext, cdpScrollForContext, cdpSnapshotForContext, cdpTabForWindow, cdpTypeFocusedForContext, cdpTypeForContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
+import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type WaitForParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type UiCondition, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler } from "./runtime.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
+import { claimCurrentActorResource, currentActorId, withCurrentActorMutation } from "./control-plane.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
 
@@ -29,7 +30,7 @@ interface ActivationFlags {
 }
 
 type ExecutionVariant = "stealth" | "default";
-type ActionDelivery = "ax" | NativeInputDelivery;
+type ActionDelivery = "ax" | "cdp" | NativeInputDelivery;
 type DeliveryPolicy = "ax_only" | "background" | "default" | "foreground";
 type ActOutcome = "worked" | "didnt" | "unknown";
 
@@ -39,7 +40,8 @@ interface ExecutionTrace {
 		| "act"
 		| "wait"
 		| "browser_open_location"
-		| "cdp_navigate";
+		| "cdp_navigate"
+		| "cdp_evaluate";
 	runtimeMode?: ExecutionVariant;
 	variant?: ExecutionVariant;
 	stealthCompatible?: boolean;
@@ -54,6 +56,8 @@ interface ExecutionTrace {
 	actionCount?: number;
 	stoppedAt?: number;
 	backgroundFirst?: boolean;
+	executionMode?: "background" | "foreground";
+	foregrounded?: boolean;
 	escalatedToForeground?: boolean;
 	escalationReason?: string;
 	backgroundAttempt?: { outcome: "foreground_required" | "didnt"; reason: string };
@@ -96,6 +100,8 @@ interface ComputerUseDetails {
 	note?: WindowNote;
 	activation: ActivationFlags;
 	execution: ExecutionTrace;
+	resource: { key: string; epoch: number; actorId: string };
+	timings?: Record<string, number>;
 	config?: {
 		browser_use: boolean;
 		headless: boolean;
@@ -134,6 +140,7 @@ interface TerminalDesktopActionDetails {
 	};
 	execution: ExecutionTrace;
 	error: { code: string; message: string };
+	resource: { key: string; epoch: number; actorId: string };
 }
 
 
@@ -184,6 +191,8 @@ interface BrowserObservationDetails {
 	root: { ref: string; kind: "browser_page"; title: string; url: string };
 	outline: SerializedOutline;
 	renderedOutline: string;
+	execution: ExecutionTrace;
+	resource: { key: string; epoch: number; actorId: string };
 }
 
 interface EvaluateBrowserDetails {
@@ -271,9 +280,11 @@ interface RuntimeState {
 	windowRefByIdentity: Map<string, string>;
 	browserRootByContext: Map<string, string>;
 	browserContextByRoot: Map<string, string>;
+	browserOwnerByContext: Map<string, string>;
 	nextRootRefIndex: number;
 	managedBrowser?: ChildProcess;
 	managedBrowserCdpPort?: string;
+	managedBrowserProfileDir?: string;
 	previousCdpPort?: string;
 	permissionStatus?: PermissionStatus;
 	helperDiagnostics?: PlatformDiagnostics;
@@ -289,12 +300,19 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const LOOK_TIMEOUT_MS = 33_000;
 
 const ACTION_SETTLE_MS = 280;
+const FOREGROUND_ATTENTION_RESOURCE_KEY = "desktop-attention:foreground";
 
 const BROWSER_CONTEXT_PREFIX = "browser:";
 const MANAGED_BROWSER_READY_TIMEOUT_MS = 15_000;
 const AUTO_IMAGE_MAX_DIMENSION = 900;
 const EXPLICIT_IMAGE_MAX_DIMENSION = 1_600;
 const BROWSER_TRANSACTION_ACTIONS = new Set<UiAction["action"]>(["press", "click", "setText", "typeText", "keypress", "scroll", "drag", "moveMouse"]);
+const SCUA_AGENT_ID = process.env.SCUA_AGENT_ID?.trim() || randomUUID();
+
+function visualAgentId(): string {
+	const actorId = currentActorId();
+	return actorId === "default" ? SCUA_AGENT_ID : actorId;
+}
 
 const runtimeState: RuntimeState = {
 	lastPermissionCheckAt: 0,
@@ -302,6 +320,7 @@ const runtimeState: RuntimeState = {
 	windowRefByIdentity: new Map(),
 	browserRootByContext: new Map(),
 	browserContextByRoot: new Map(),
+	browserOwnerByContext: new Map(),
 	nextRootRefIndex: 1,
 };
 
@@ -312,8 +331,8 @@ function operationState(): OperationState {
 	return savedStates.current();
 }
 
-function desktopResourceKey(target: Pick<CurrentTarget, "pid">): string {
-	return `desktop-pid:${target.pid}`;
+function desktopResourceKey(target: Pick<CurrentTarget, "pid" | "windowId" | "nativeWindowRef">): string {
+	return `desktop-app:${target.pid}`;
 }
 
 function persistOperation(state: OperationState): void {
@@ -327,14 +346,18 @@ function persistOperation(state: OperationState): void {
 export async function shutdownComputerUseSession(): Promise<void> {
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
+	await closeCdpBrowser(runtimeState.managedBrowserCdpPort);
 	disconnectCdp();
 
 	const managedBrowser = runtimeState.managedBrowser;
 	runtimeState.managedBrowser = undefined;
-	if (managedBrowser) {
+	if (managedBrowser?.exitCode === null) {
 		managedBrowser.kill("SIGTERM");
 		managedBrowser.unref();
 	}
+	const profileDir = runtimeState.managedBrowserProfileDir;
+	runtimeState.managedBrowserProfileDir = undefined;
+	if (profileDir) await rm(profileDir, { force: true, recursive: true }).catch(() => undefined);
 	if (runtimeState.managedBrowserCdpPort && process.env.PI_COMPUTER_USE_CDP_PORT === runtimeState.managedBrowserCdpPort) {
 		if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
 		else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
@@ -348,11 +371,18 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	runtimeState.windowRefByIdentity.clear();
 	runtimeState.browserRootByContext.clear();
 	runtimeState.browserContextByRoot.clear();
+	runtimeState.browserOwnerByContext.clear();
 	runtimeState.nextRootRefIndex = 1;
 	runtimeState.permissionStatus = undefined;
 	runtimeState.helperDiagnostics = undefined;
 	runtimeState.lastPermissionCheckAt = 0;
 	await currentPlatformBackend.shutdown?.();
+}
+
+/** Give a lease recipient a fresh actor-owned ID for the latest immutable
+ * desktop snapshot, without granting access to the sender's state ID. */
+export function handoffSavedDesktopState(resourceKey: string, fromActorId: string, toActorId: string): string | undefined {
+	return savedStates.transferLatestDesktop(resourceKey, fromActorId, toActorId);
 }
 
 function currentRuntimeMode(): ExecutionVariant {
@@ -362,7 +392,18 @@ function currentRuntimeMode(): ExecutionVariant {
 function currentDeliveryPolicy(): DeliveryPolicy {
 	if (isHeadlessMode()) return "background";
 	const value = (process.env.PI_COMPUTER_USE_DELIVERY_POLICY ?? process.env.PI_COMPUTER_USE_EVENT_DELIVERY ?? "default").toLowerCase();
-	return value === "background" || value === "pid" ? "background" : value === "foreground" || value === "hid" ? "foreground" : value === "ax_only" || value === "ax-only" ? "ax_only" : "default";
+	if (value === "background" || value === "pid") return "background";
+	if (value === "foreground" || value === "hid") return "foreground";
+	if (value === "ax_only" || value === "ax-only") return "ax_only";
+	return getComputerUseConfig().execution_mode === "foreground" ? "foreground" : "default";
+}
+
+function currentExecutionMode(): "background" | "foreground" {
+	if (isHeadlessMode()) return "background";
+	const debugValue = (process.env.PI_COMPUTER_USE_DELIVERY_POLICY ?? process.env.PI_COMPUTER_USE_EVENT_DELIVERY ?? "").trim().toLowerCase();
+	if (debugValue === "foreground" || debugValue === "hid") return "foreground";
+	if (debugValue === "background" || debugValue === "pid" || debugValue === "ax_only" || debugValue === "ax-only") return "background";
+	return getComputerUseConfig().execution_mode;
 }
 
 function nativeInputDelivery(policy = currentDeliveryPolicy()): NativeInputDelivery {
@@ -428,14 +469,18 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function withWindowWriteLock<T>(target: ResolvedTarget | CurrentTarget, work: () => Promise<T>): Promise<T> {
+async function withWindowWriteLock<T>(target: ResolvedTarget | CurrentTarget, work: () => Promise<T>, guard?: () => Promise<void>): Promise<T> {
 	const state = operationState();
 	const key = desktopResourceKey(target);
 	const baseEpoch = state.epoch ?? resourceScheduler.epoch(key);
-	const result = await resourceScheduler.write(key, baseEpoch, async (nextEpoch) => {
+	// All native mutations currently take the conservative process-level claim:
+	// focus, menus, sheets, and keyboard state can cross window boundaries even
+	// when the referenced element belongs to one window. Different apps retain
+	// full concurrency; proven window-local action classes can be relaxed later.
+	const result = await resourceScheduler.writeGuarded(key, baseEpoch, [], guard, async (nextEpoch) => {
 		state.resourceKey = key;
 		state.epoch = nextEpoch;
-		return await work();
+		return await withCurrentActorMutation(key, work);
 	});
 	return result.value;
 }
@@ -474,7 +519,12 @@ function validateStateId(stateId?: string): CurrentCapture {
 		);
 	}
 	const stateTarget = state.currentStateTarget;
-	if (stateTarget && state.currentTarget && (stateTarget.pid !== state.currentTarget.pid || stateTarget.windowId !== state.currentTarget.windowId)) {
+	if (stateTarget && state.currentTarget && (
+		stateTarget.pid !== state.currentTarget.pid
+		|| (stateTarget.nativeWindowRef && state.currentTarget.nativeWindowRef
+			? stateTarget.nativeWindowRef !== state.currentTarget.nativeWindowRef
+			: stateTarget.windowId !== state.currentTarget.windowId)
+	)) {
 		throw new Error("The latest state belongs to a different window. Call observe_ui for the target window and retry.");
 	}
 	return state.currentCapture;
@@ -667,6 +717,22 @@ function storeBrowserRootRef(contextId: string): string {
 	runtimeState.browserRootByContext.set(contextId, ref);
 	runtimeState.browserContextByRoot.set(ref, contextId);
 	return ref;
+}
+
+export function handoffManagedRoot(resourceKey: string, recipientActorId: string): void {
+	if (!resourceKey.startsWith("cdp:")) return;
+	const contextId = `${BROWSER_CONTEXT_PREFIX}${resourceKey.slice("cdp:".length)}`;
+	if (runtimeState.browserOwnerByContext.has(contextId)) runtimeState.browserOwnerByContext.set(contextId, recipientActorId);
+}
+
+export function releaseManagedRootsForActor(actorId: string): void {
+	for (const [contextId, owner] of runtimeState.browserOwnerByContext) {
+		if (owner !== actorId) continue;
+		runtimeState.browserOwnerByContext.delete(contextId);
+		const rootRef = runtimeState.browserRootByContext.get(contextId);
+		if (rootRef) runtimeState.browserContextByRoot.delete(rootRef);
+		runtimeState.browserRootByContext.delete(contextId);
+	}
 }
 
 function storeWindowRefForTarget(target: ResolvedTarget): string {
@@ -1001,7 +1067,7 @@ function noteWindowForTarget(target: ResolvedTarget | CurrentTarget, look?: Look
 	};
 }
 
-async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = true): Promise<CaptureResult> {
+async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "always" | "never" = "auto", maxDimension = AUTO_IMAGE_MAX_DIMENSION, targetOverride?: ResolvedTarget, includeImage = false): Promise<CaptureResult> {
 	const state = operationState();
 	const baseOutline = state.currentOutline;
 	const baseTarget = state.currentTarget;
@@ -1015,12 +1081,14 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 
 	setCurrentTarget(target);
 	state.currentCapture = capture;
-	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef };
+	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef };
 	state.currentLook = look;
 	state.currentOutline = outline;
 	state.currentNote = noteFromLook(state.currentNote, outline, noteWindowForTarget(target, look));
-	state.resourceKey = desktopResourceKey(target);
-	state.epoch ??= resourceScheduler.epoch(state.resourceKey);
+	const nextResourceKey = desktopResourceKey(target);
+	if (state.resourceKey !== nextResourceKey) state.epoch = resourceScheduler.epoch(nextResourceKey);
+	state.resourceKey = nextResourceKey;
+	state.epoch ??= resourceScheduler.epoch(nextResourceKey);
 
 	return {
 		target,
@@ -1029,6 +1097,81 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 		outline,
 		activation: emptyActivation(),
 	};
+}
+
+/**
+ * Refresh only editable targets after deterministic value writes, then graft
+ * those semantic subtrees into a cloned immutable outline. Full-window AX
+ * enumeration is unnecessary for a setText whose affected ref is known.
+ */
+async function captureEditedTargets(
+	target: ResolvedTarget,
+	baseOutline: Outline,
+	refs: string[],
+	signal?: AbortSignal,
+): Promise<CaptureResult> {
+	const state = operationState();
+	const outline = restoreOutline(serializeOutline(baseOutline));
+	const previousLook = state.currentLook;
+	if (!previousLook) throw new Error("No base look is available for a scoped successor observation.");
+	let latestLook = previousLook;
+	for (const ref of [...new Set(refs)]) {
+		const node = nodeByRef(outline, ref);
+		if (!node) throw new Error(`Edited ref '${ref}' is unavailable for successor observation.`);
+		const scoped = await performLook(target, {
+			readText: "never",
+			baseLookId: outline.lookId,
+			scopeRef: wireRefForNode(node),
+			maxDimension: 1,
+			includeImage: false,
+		}, signal);
+		graftScopedOutline(outline, ref, scoped.parsedOutline!);
+		outline.lookId = scoped.lookId;
+		latestLook = scoped;
+	}
+	const look: LookResponse = {
+		...latestLook,
+		image: previousLook.image,
+		outline: outline.root,
+		parsedOutline: outline,
+	};
+	const capture = captureForLook(look);
+	setCurrentTarget(target);
+	state.currentCapture = capture;
+	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef };
+	state.currentLook = look;
+	state.currentOutline = outline;
+	state.currentNote = noteFromLook(state.currentNote, outline, noteWindowForTarget(target, look));
+	return { target, capture, look, outline, activation: emptyActivation() };
+}
+
+/** A visual-only pointer move cannot change UI state, so reissue the immutable
+ * snapshot identity without paying for another AX traversal. */
+function captureUnchangedCurrentTarget(target: ResolvedTarget): CaptureResult {
+	const state = operationState();
+	const look = state.currentLook;
+	const outline = state.currentOutline;
+	if (!look || !outline) throw new Error("No base observation is available for an unchanged successor state.");
+	const capture = captureForLook(look);
+	state.currentCapture = capture;
+	state.currentStateTarget = { pid: target.pid, windowId: target.windowId, windowRef: target.windowRef, nativeWindowRef: target.nativeWindowRef };
+	return { target, capture, look, outline, activation: emptyActivation() };
+}
+
+/**
+ * Auto mode is semantic-first: pay capture/encoding/OCR only after the AX
+ * outline proves too sparse or unlabeled to be useful on its own.
+ */
+async function captureCurrentTargetAuto(
+	tool: string,
+	signal?: AbortSignal,
+	readText: "auto" | "always" | "never" = "auto",
+	maxDimension = AUTO_IMAGE_MAX_DIMENSION,
+	targetOverride?: ResolvedTarget,
+): Promise<CaptureResult> {
+	const semantic = await captureCurrentTarget(signal, readText, maxDimension, targetOverride, false);
+	if (!imageFallbackReason(tool, semantic, "auto")) return semantic;
+	return await captureCurrentTarget(signal, readText === "never" ? "never" : "always", maxDimension, semantic.target, true);
 }
 
 async function buildToolResult(
@@ -1076,6 +1219,12 @@ async function buildToolResult(
 		note: state.currentNote,
 		activation: result.activation,
 		execution,
+		resource: {
+			key: state.resourceKey ?? desktopResourceKey(result.target),
+			epoch: state.epoch ?? resourceScheduler.epoch(state.resourceKey ?? desktopResourceKey(result.target)),
+			actorId: currentActorId(),
+		},
+		timings: result.look.timings,
 		status: "ok",
 		config: getComputerUseConfig(),
 		helper: runtimeState.helperDiagnostics,
@@ -1160,7 +1309,7 @@ function modelRefForRootDelta(delta: NonNullable<HelperActResult["rootDelta"]>[n
 	return ref;
 }
 
-function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy()): ExecutionTrace {
+function executionTraceFromAct(result: HelperActResult, policy = currentDeliveryPolicy(), foregrounded = false): ExecutionTrace {
 	const rootDelta = result.rootDelta?.map((delta) => ({ ...delta, ref: modelRefForRootDelta(delta) }));
 	return executionTrace("act", result.performed?.delivery === "ax" ? "stealth" : "default", {
 		outcome: result.outcome,
@@ -1171,7 +1320,34 @@ function executionTraceFromAct(result: HelperActResult, policy = currentDelivery
 		rootDelta,
 		delivery: result.performed?.delivery,
 		deliveryPolicy: policy,
+		executionMode: currentExecutionMode(),
+		foregrounded,
 	});
+}
+
+function assertHeadlessDelivery(result: HelperActResult, headless: boolean): void {
+	if (!headless) return;
+	if (result.performed?.delivery === "hid" || result.performed?.activated || result.performed?.raised) {
+		const error = new Error("SCUA headless invariant rejected HID delivery or application activation.") as Error & { code: string; delivery: string };
+		error.code = "non_interference_violation";
+		error.delivery = "may_have_been_delivered";
+		throw error;
+	}
+	for (const step of result.steps ?? []) assertHeadlessDelivery(step, headless);
+}
+
+async function withForegroundAttention<T>(target: ResolvedTarget, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	const scheduled = await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => {
+		throwIfAborted(signal);
+		const focused = await currentPlatformBackend.focusWindow({
+			pid: target.pid,
+			windowId: target.windowId,
+			rootRef: target.nativeWindowRef,
+		}, signal);
+		if (!focused.focused) throw new Error(`SCUA could not bring ${target.appName} — ${target.windowTitle} to the foreground.`);
+		return await work();
+	});
+	return scheduled.value;
 }
 
 async function helperAct(
@@ -1180,52 +1356,84 @@ async function helperAct(
 	headless: boolean,
 	signal?: AbortSignal,
 ): Promise<ExecutionTrace> {
+	const executionMode = currentExecutionMode();
+	const allowForegroundFallback = !headless;
 	const checked = (candidate: HelperActResult): HelperActResult => {
 		if (!candidate || !["worked", "didnt", "unknown"].includes(candidate.outcome)) {
 			throw new Error("Helper act returned an invalid result without an outcome.");
 		}
+		assertHeadlessDelivery(candidate, headless);
 		return candidate;
 	};
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
-	if ((action.usesCurrentFocus || action.needsForeground) && !headless) {
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
-		const trace = executionTraceFromAct(foreground, "foreground");
-		trace.backgroundFirst = false;
-		return trace;
+	const deliver = async (policy: DeliveryPolicy): Promise<HelperActResult> => checked(await currentPlatformBackend.act(helperActRequest(target, action, policy), { signal, timeoutMs }));
+	const foregroundTrace = async (backgroundFirst: boolean, reason?: string, backgroundAttempt?: ExecutionTrace["backgroundAttempt"]): Promise<ExecutionTrace> => {
+		return await withForegroundAttention(target, async () => {
+			const foreground = await deliver("foreground");
+			const trace = executionTraceFromAct(foreground, "foreground", true);
+			trace.backgroundFirst = backgroundFirst;
+			if (backgroundFirst) {
+				trace.escalatedToForeground = true;
+				trace.escalationReason = reason;
+				trace.backgroundAttempt = backgroundAttempt;
+			}
+			return trace;
+		}, signal);
+	};
+	if ((action.usesCurrentFocus || action.needsForeground) && allowForegroundFallback) {
+		return await foregroundTrace(false);
+	}
+	if (executionMode === "foreground" && !headless) {
+		return await withForegroundAttention(target, async () => {
+			let result: HelperActResult;
+			try {
+				result = await deliver("background");
+			} catch (error) {
+				const code = (error as Error & { code?: string })?.code;
+				if (code !== "foreground_required") throw error;
+				const foreground = await deliver("foreground");
+				const trace = executionTraceFromAct(foreground, "foreground", true);
+				trace.backgroundFirst = true;
+				trace.escalatedToForeground = true;
+				trace.escalationReason = code;
+				trace.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
+				return trace;
+			}
+			if (canRetryInForeground(action, result.outcome, headless)) {
+				const foreground = await deliver("foreground");
+				const trace = executionTraceFromAct(foreground, "foreground", true);
+				trace.backgroundFirst = true;
+				trace.escalatedToForeground = true;
+				trace.escalationReason = "side_effect_free_didnt";
+				trace.backgroundAttempt = { outcome: "didnt", reason: "Visible semantic delivery produced no observable value change; a physical retry was safe." };
+				return trace;
+			}
+			const trace = executionTraceFromAct(result, "background", true);
+			trace.backgroundFirst = true;
+			return trace;
+		}, signal);
 	}
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
-		const result = checked(await currentPlatformBackend.act(helperActRequest(target, action, initialPolicy), { signal, timeoutMs }));
-		if (canRetryInForeground(action, result.outcome, headless)) {
-			const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
-			const trace = executionTraceFromAct(foreground, "foreground");
-			trace.backgroundFirst = true;
-			trace.escalatedToForeground = true;
-			trace.escalationReason = "side_effect_free_didnt";
-			trace.backgroundAttempt = { outcome: "didnt", reason: "Background input produced no observable value change; a foreground retry was safe." };
-			return trace;
+		const result = await deliver(initialPolicy);
+		if (allowForegroundFallback && canRetryInForeground(action, result.outcome, headless)) {
+			return await foregroundTrace(true, "side_effect_free_didnt", { outcome: "didnt", reason: "Background input produced no observable value change; a foreground retry was safe." });
 		}
 		const trace = executionTraceFromAct(result, "background");
 		trace.backgroundFirst = true;
 		return trace;
 	} catch (error) {
 		const code = (error as Error & { code?: string })?.code;
-		if (code !== "foreground_required" || headless) throw error;
-		const foreground = checked(await currentPlatformBackend.act(helperActRequest(target, action, "foreground"), { signal, timeoutMs }));
-		const trace = executionTraceFromAct(foreground, "foreground");
-		trace.backgroundFirst = true;
-		trace.escalatedToForeground = true;
-		trace.escalationReason = code;
-		trace.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
-		return trace;
+		if (code !== "foreground_required" || !allowForegroundFallback) throw error;
+		return await foregroundTrace(true, code, { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) });
 	}
 }
 
 function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, policy = currentDeliveryPolicy()): PlatformActRequest {
 	const look = currentLookOrThrow();
 	const delivery = nativeInputDelivery(policy);
-	const base = { lookId: look.lookId, pid: target.pid, target: action.target, policy };
+	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy };
 	return (() => {
 		switch (action.action) {
 			case "press":
@@ -1321,6 +1529,7 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 	const desktopForest = await windowDetailsForFind(query, config, signal);
 	const includeBrowserPages = !query.pid && !query.bundleId && (!query.app || normalizeText(query.app) === "browser") && config.browser_use;
 	const browserForest: ListWindowsDetails["windows"] = !includeBrowserPages ? [] : (await listCdpPageContexts().catch(() => []))
+		.filter((page) => runtimeState.browserOwnerByContext.get(page.contextId) === currentActorId())
 		.map((page) => ({
 			app: "Browser",
 			pid: 0,
@@ -1364,6 +1573,10 @@ function isBrowserContextId(contextId: string | undefined): contextId is string 
 	return Boolean(contextId?.startsWith(BROWSER_CONTEXT_PREFIX));
 }
 
+export function searchMayEscalateToDesktopOcr(contextId: string | undefined): boolean {
+	return !isBrowserContextId(contextId);
+}
+
 function browserSnapshotTarget(snapshotId: string | undefined, ref: string | undefined): { contextId: string; backendNodeId?: number } | undefined {
 	if (!snapshotId || !ref) return undefined;
 	const record = savedStates.get(snapshotId);
@@ -1378,39 +1591,46 @@ function browserContextForOperation(): string | undefined {
 	return isBrowserContextId(contextId) ? contextId : undefined;
 }
 
-async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>): Promise<T> {
+async function withBrowserWrite<T>(contextId: string, work: () => Promise<T>, guard?: () => Promise<void>): Promise<T> {
 	const state = operationState();
 	const targetId = contextId.slice(BROWSER_CONTEXT_PREFIX.length);
 	const resourceKey = `cdp:${targetId}`;
 	const baseEpoch = state.epoch ?? resourceScheduler.epoch(resourceKey);
-	const result = await resourceScheduler.write(resourceKey, baseEpoch, async (nextEpoch) => {
+	const result = await resourceScheduler.writeGuarded(resourceKey, baseEpoch, [], guard, async (nextEpoch) => {
 		state.resourceKey = resourceKey;
 		state.epoch = nextEpoch;
-		return await work();
+		return await withCurrentActorMutation(resourceKey, work);
 	});
 	return result.value;
 }
 
-function browserObservationResult(browser: CdpPageSnapshot, resourceKey: string, epoch: number, tool: string, base?: { stateId: string; outline: SerializedOutline }): AgentToolResult<BrowserObservationDetails> {
-	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", snapshot: browser, outline: browser.outline } });
+function browserObservationResult(
+	browser: CdpPageSnapshot,
+	resourceKey: string,
+	epoch: number,
+	tool: string,
+	base?: { stateId: string; outline: SerializedOutline },
+	execution: ExecutionTrace = executionTrace("look", "stealth"),
+): AgentToolResult<BrowserObservationDetails> {
+	savedStates.set({ stateId: browser.snapshotId, resourceKey, epoch, value: { kind: "browser", actorId: currentActorId(), snapshot: browser, outline: browser.outline } });
 	const currentOutline = restoreOutline(browser.outline);
 	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
 	const folded = foldToBudget(currentOutline);
 	const root = { ref: storeBrowserRootRef(browser.contextId), kind: "browser_page" as const, title: browser.title, url: browser.url };
-	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text };
+	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, execution, resource: { key: resourceKey, epoch, actorId: currentActorId() } };
 	const viewText = useDiff
 		? `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.`
 		: folded.text;
 	return { content: [{ type: "text", text: `${tool} completed for ${root.ref} ${JSON.stringify(browser.title)}. State ${browser.snapshotId}.\n${viewText}` }], details };
 }
 
-async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }): Promise<AgentToolResult<BrowserObservationDetails>> {
+async function refreshBrowserSnapshot(contextId: string, tool: string, base?: { stateId: string; outline: SerializedOutline }, execution?: ExecutionTrace): Promise<AgentToolResult<BrowserObservationDetails>> {
 	const browser = await cdpSnapshotForContext(contextId);
 	if (!browser) throw new Error(`Browser root '${contextId}' is no longer available. Call find_roots and observe_ui again.`);
 	const state = operationState();
 	const resourceKey = state.resourceKey ?? `cdp:${browser.targetId}`;
-	return browserObservationResult(browser, resourceKey, state.epoch ?? resourceScheduler.epoch(resourceKey), tool, base);
+	return browserObservationResult(browser, resourceKey, state.epoch ?? resourceScheduler.epoch(resourceKey), tool, base, execution);
 }
 
 function sliceText(value: string, offsetValue: unknown, _limitValue?: unknown): Pick<ReadTextDetails, "offset" | "limit" | "totalChars" | "hasMore" | "text"> {
@@ -1530,6 +1750,92 @@ function conditionScopeNode(outline: Outline, condition: ReturnType<typeof valid
 	return scopeNode;
 }
 
+class LiveGuardError extends Error {
+	readonly code = "guard_failed";
+	readonly delivery = "definitely_not_delivered";
+	readonly resourceKey: string;
+	readonly evidence: Record<string, unknown>;
+
+	constructor(resourceKey: string, guardIndex: number, message: string, evidence: Record<string, unknown> = {}) {
+		super(message);
+		this.name = "LiveGuardError";
+		this.resourceKey = resourceKey;
+		this.evidence = { guardIndex, ...evidence };
+	}
+}
+
+function validatedGuards(raw: UiCondition[] | undefined, outline: Outline): Array<{ condition: ReturnType<typeof validateCondition>; scopeNode?: OutlineNode }> {
+	if (!raw?.length) return [];
+	if (raw.length > 8) throw new Error("act_ui supports at most 8 live guards.");
+	return raw.map((guard, index) => {
+		const condition = validateCondition({ ...guard, timeoutMs: guard.timeoutMs ?? 250 });
+		const scopeNode = conditionScopeNode(outline, condition);
+		const cachedSatisfied = outlineConditionPresent(outline, condition) !== condition.gone;
+		if (!cachedSatisfied) {
+			throw new LiveGuardError(operationState().resourceKey ?? "unknown", index, "A commit guard is not satisfied in the immutable base state.", {
+				text: condition.text,
+				role: condition.role,
+				value: condition.value,
+				gone: condition.gone,
+			});
+		}
+		return { condition, scopeNode };
+	});
+}
+
+async function assertDesktopLiveGuards(
+	target: ResolvedTarget,
+	resourceKey: string,
+	guards: ReturnType<typeof validatedGuards>,
+	signal?: AbortSignal,
+): Promise<void> {
+	for (let index = 0; index < guards.length; index += 1) {
+		const { condition, scopeNode } = guards[index];
+		const result = await currentPlatformBackend.waitFor({
+			...nativeWindowRequest(target),
+			lookId: operationState().currentOutline!.lookId,
+			text: condition.text,
+			role: platformRole(operationState().currentOutline!, condition.role),
+			value: condition.value,
+			scopeRef: scopeNode ? wireRefForNode(scopeNode) : undefined,
+			scopeExact: condition.scopeExact,
+			gone: condition.gone,
+			timeoutMs: condition.timeoutMs,
+		}, { signal, timeoutMs: condition.timeoutMs + 500 });
+		if (!result.found) {
+			throw new LiveGuardError(resourceKey, index, "The live UI changed after observation; the guarded action was not delivered.", {
+				text: condition.text,
+				role: condition.role,
+				value: condition.value,
+				gone: condition.gone,
+				timedOut: result.timedOut,
+			});
+		}
+	}
+}
+
+async function assertBrowserLiveGuards(
+	contextId: string,
+	resourceKey: string,
+	guards: ReturnType<typeof validatedGuards>,
+): Promise<void> {
+	if (!guards.length) return;
+	const snapshot = await cdpSnapshotForContext(contextId);
+	if (!snapshot) throw new LiveGuardError(resourceKey, 0, "The guarded browser root is no longer available.");
+	const liveOutline = restoreOutline(snapshot.outline);
+	for (let index = 0; index < guards.length; index += 1) {
+		const { condition } = guards[index];
+		if (outlineConditionPresent(liveOutline, condition) === condition.gone) {
+			throw new LiveGuardError(resourceKey, index, "The live browser page changed after observation; the guarded action was not delivered.", {
+				text: condition.text,
+				role: condition.role,
+				value: condition.value,
+				gone: condition.gone,
+			});
+		}
+	}
+}
+
 async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Promise<AgentToolResult<WaitForDetails>> {
 	const contextId = operationState().contextId;
 	const condition = validateCondition(params);
@@ -1544,9 +1850,10 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 		const deadline = Date.now() + timeoutMs;
 		let lastSnapshot: CdpPageSnapshot | undefined;
 		let lastEpoch = state.epoch ?? resourceScheduler.epoch(state.resourceKey);
+		let mutationGeneration = await cdpMutationGenerationForContext(contextId);
 		const finish = (found: boolean, timedOut?: boolean): AgentToolResult<WaitForDetails> => {
 			if (!lastSnapshot) throw new Error("Browser wait completed without an observation.");
-			savedStates.set({ stateId: lastSnapshot.snapshotId, resourceKey: state.resourceKey!, epoch: lastEpoch, value: { kind: "browser", snapshot: lastSnapshot, outline: lastSnapshot.outline } });
+			savedStates.set({ stateId: lastSnapshot.snapshotId, resourceKey: state.resourceKey!, epoch: lastEpoch, value: { kind: "browser", actorId: currentActorId(), snapshot: lastSnapshot, outline: lastSnapshot.outline } });
 			const successorOutline = restoreOutline(lastSnapshot.outline);
 			const transition = changesBetween(restoreOutline(baseSnapshot.outline), successorOutline);
 			const useDiff = !transition.useFullView;
@@ -1556,15 +1863,29 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 			const viewText = useDiff ? `${renderChanges(transition.changes) || "(no element changes)"}\nUse stateId ${lastSnapshot.snapshotId} for subsequent actions and queries.` : renderedOutline;
 			return { content: [{ type: "text", text: `${message}\n${viewText}` }], details };
 		};
-		do {
-			const scheduled = await resourceScheduler.read(state.resourceKey, async () => await cdpSnapshotForContext(contextId));
+		const observeCondition = async (): Promise<boolean> => {
+			const scheduled = await resourceScheduler.read(state.resourceKey!, async () => await cdpSnapshotForContext(contextId));
 			lastSnapshot = scheduled.value;
 			lastEpoch = scheduled.epoch;
 			if (!lastSnapshot) throw new Error(`Browser root '${contextId}' is no longer available. Call find_roots and observe_ui again.`);
 			const present = outlineConditionPresent(restoreOutline(lastSnapshot.outline), condition);
-			if (present !== gone) return finish(true);
-			await sleep(200, signal);
-		} while (Date.now() < deadline);
+			return present !== gone;
+		};
+		if (await observeCondition()) return finish(true);
+		while (Date.now() < deadline) {
+			throwIfAborted(signal);
+			const before = mutationGeneration ?? 0;
+			const next = await cdpWaitForMutationForContext(contextId, before, deadline - Date.now(), signal);
+			if (next === undefined) throw new Error(`Browser root '${contextId}' is no longer available. Call find_roots and observe_ui again.`);
+			mutationGeneration = next;
+			if (next === before && Date.now() < deadline) {
+				// MutationObserver is a wake-up hint, not authority: accessibility-
+				// only, canvas, and iframe changes get a bounded full-tree fallback.
+				if (await observeCondition()) return finish(true);
+				continue;
+			}
+			if (next !== before && await observeCondition()) return finish(true);
+		}
 		return finish(false, true);
 	}
 
@@ -1585,7 +1906,7 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 		timeoutMs,
 	}, { signal, timeoutMs: timeoutMs + 2_000 });
 	if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
-	const refreshed = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTarget(signal, "auto"))).value;
+	const refreshed = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTargetAuto("wait_for", signal, "auto"))).value;
 	const transition = changesBetween(baseView.outline, refreshed.outline);
 	const useDiff = !transition.useFullView;
 	const matches = searchOutline(refreshed.outline, text, role, undefined, 1);
@@ -1615,8 +1936,8 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 
 function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 	if (a.pid !== b.pid) return false;
-	if (a.windowId > 0 && b.windowId > 0) return a.windowId === b.windowId;
 	if (a.nativeWindowRef && b.nativeWindowRef) return a.nativeWindowRef === b.nativeWindowRef;
+	if (a.windowId > 0 && b.windowId > 0) return a.windowId === b.windowId;
 	return normalizeText(a.windowTitle) === normalizeText(b.windowTitle);
 }
 
@@ -1624,8 +1945,17 @@ function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 async function performObserve(params: ObserveParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | BrowserObservationDetails>> {
 	const requestedRoot = typeof params.root === "string" ? params.root : undefined;
 	if (requestedRoot && !/^@r\d+$/.test(requestedRoot)) throw new Error("observe_ui.root must be an exact @r ref issued by find_roots.");
-	const browserContextId = requestedRoot ? runtimeState.browserContextByRoot.get(requestedRoot) : undefined;
+	const state = operationState();
+	// A plan refresh supplies the stale stateId rather than rediscovering a root.
+	// Hydration already restored its exact backend context; preserve it so a CDP
+	// branch can never fall through to frontmost desktop observation.
+	const browserContextId = requestedRoot
+		? runtimeState.browserContextByRoot.get(requestedRoot)
+		: params.stateId && isBrowserContextId(state.contextId)
+			? state.contextId
+			: undefined;
 	if (isBrowserContextId(browserContextId)) {
+		if (runtimeState.browserOwnerByContext.get(browserContextId) !== currentActorId()) throw new Error("Browser root is owned by a different SCUA actor.");
 		const targetId = browserContextId.slice(BROWSER_CONTEXT_PREFIX.length);
 		const resourceKey = `cdp:${targetId}`;
 		const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(browserContextId));
@@ -1633,7 +1963,6 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 		if (!browser) throw new Error(`Browser context '${browserContextId}' is no longer available. Call find_roots again.`);
 		return browserObservationResult(browser, resourceKey, scheduled.epoch, "observe_ui");
 	}
-	const state = operationState();
 	const mode = params.mode ?? "fused";
 	const image = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
 	const defaultReadText = mode === "semantic" ? "never" : mode === "visual" ? "always" : "auto";
@@ -1648,7 +1977,8 @@ async function performObserve(params: ObserveParams, signal?: AbortSignal): Prom
 	const scheduled = await resourceScheduler.read(resourceKey, async (epoch) => {
 		state.resourceKey = resourceKey;
 		state.epoch = epoch;
-		return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, imageMode !== "never");
+		if (imageMode === "auto") return await captureCurrentTargetAuto("observe_ui", signal, readText, AUTO_IMAGE_MAX_DIMENSION, requestedTarget);
+		return await captureCurrentTarget(signal, readText, imageMode === "always" ? EXPLICIT_IMAGE_MAX_DIMENSION : AUTO_IMAGE_MAX_DIMENSION, requestedTarget, imageMode === "always");
 	});
 	const captureResult = scheduled.value;
 	// Model @r refs are re-minted on re-resolution, so ref string equality
@@ -1692,7 +2022,9 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	let matches = ranked.matches;
 	let escalatedOCR = false;
 	const look = state.currentLook;
-	if (shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
+	// Browser roots own a CDP snapshot, not a desktop window. Never leak an
+	// empty/static browser search into desktop capture or OCR.
+	if (searchMayEscalateToDesktopOcr(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
 		state.lastSearchOcrEscalatedLookId = look.lookId;
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		// captureCurrentTarget adopts the new look/outline/capture into
@@ -1700,7 +2032,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 		// payload: OCR-only matches are clicked by coordinate, and coordinate
 		// acts require the current look to be image-bearing.
 		if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
-		const captureResult = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTarget(signal, "always", AUTO_IMAGE_MAX_DIMENSION, currentTarget))).value;
+		const captureResult = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTarget(signal, "always", AUTO_IMAGE_MAX_DIMENSION, currentTarget, true))).value;
 		outline = captureResult.outline;
 		ranked = searchOutlineRanked(outline, text, role, capability, limit);
 		matches = ranked.matches;
@@ -1787,10 +2119,24 @@ function prepareUiAction(action: UiAction, state: ActionState, look: LookRespons
 	return prepareAction(action, state, {
 		headless,
 		image: look.image,
-		node: outlineNodeByRef,
+		node: (ref) => {
+			const node = look.parsedOutline ? nodeByRef(look.parsedOutline, ref) : undefined;
+			if (!node) throw new Error(`Outline ref '${ref}' is stale or not available for this immutable state. Observe the root again and choose a current @e ref.`);
+			return node;
+		},
 		center: outlineNodeCenter,
 		validatePoint: (x, y, label) => ensurePointIsInLookImage(x, y, look, label),
 	});
+}
+
+export function transactionNeedsVerifiedVisualDelivery(actions: UiAction[], look: LookResponse, headless: boolean): boolean {
+	const actionState: ActionState = { currentFocus: false };
+	for (const action of actions) {
+		const prepared = prepareUiAction(action, actionState, look, headless);
+		if (prepared.establishesFocus) actionState.currentFocus = true;
+		if ((prepared.action === "click" || prepared.action === "press" || prepared.action === "drag") && !("ref" in prepared.target)) return true;
+	}
+	return false;
 }
 
 async function dispatchUiAction(action: UiAction, target: ResolvedTarget, look: LookResponse, headless: boolean, state: ActionState, signal?: AbortSignal): Promise<ExecutionTrace> {
@@ -1844,6 +2190,8 @@ function aggregateExecutions(steps: ExecutionTrace[]): ExecutionTrace {
 		actionCount: steps.length,
 		rootDelta: steps.flatMap((step) => step.rootDelta ?? []),
 		backgroundFirst: true,
+		executionMode: currentExecutionMode(),
+		foregrounded: steps.some((step) => step.foregrounded),
 		escalatedToForeground: Boolean(fallback),
 		escalationReason: fallback?.escalationReason,
 		backgroundAttempt: fallback?.backgroundAttempt,
@@ -1935,6 +2283,7 @@ async function terminalDesktopActionResult(
 		},
 		execution,
 		error: { code, message },
+		resource: { key: desktopResourceKey(target), epoch: resourceScheduler.epoch(desktopResourceKey(target)), actorId: currentActorId() },
 	};
 	const result = targetClosed
 		? `The action was delivered, and its source root ${target.appName} — ${target.windowTitle} closed before a successor observation could be captured.`
@@ -1952,15 +2301,30 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const look = currentLookOrThrow();
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
+	const guards = validatedGuards(params.guards, look.parsedOutline!);
+	const visualSideEffect = transactionNeedsVerifiedVisualDelivery(actions, look, getComputerUseConfig().headless);
+	if (visualSideEffect && !condition) {
+		throw new Error("Visual-only activation and drag actions require expect so SCUA can verify the postcondition instead of guessing whether background delivery worked.");
+	}
+	if (visualSideEffect && condition && outlineConditionPresent(look.parsedOutline!, condition) !== condition.gone) {
+		throw new Error("The visual-only action postcondition is already satisfied in the base state, so it cannot verify this action. Choose a condition that the action must newly establish.");
+	}
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+	if (!state.currentTarget || !sameRootIdentity(state.currentTarget, target)) {
+		throw new Error("The target root changed after observation. Reobserve the exact root before dispatch; no action was delivered.");
+	}
 	const noteBefore = state.currentNote;
+	const resourceKey = desktopResourceKey(target);
 	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
+		const deliveryStartedAt = Date.now();
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
+		execution.evidence = { ...execution.evidence, deliveryMs: Date.now() - deliveryStartedAt };
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {
 			if (condition) {
+				const verificationStartedAt = Date.now();
 				const { text: expectedText, role: expectedRole, value: expectedValue, scopeExact, gone, timeoutMs } = condition;
 				const beforePresent = outlineConditionPresent(look.parsedOutline!, condition);
 				const desiredWasPreexisting = beforePresent !== gone;
@@ -1984,6 +2348,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 					timeoutMs,
 				};
 				execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", execution.verification.status);
+				execution.evidence = { ...execution.evidence, verificationMs: Date.now() - verificationStartedAt };
 				if (!verification.found) {
 					execution.error = {
 						code: "postcondition_failed",
@@ -1993,8 +2358,31 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			} else {
 				await sleep(settleMsForExecution(execution), signal);
 			}
-			const capture = await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+			const successorStartedAt = Date.now();
+			const editedRefs = executedActions.every((action) => action.action === "setText" && action.ref)
+				? executedActions.map((action) => action.ref!)
+				: undefined;
+			const capture = executedActions.every((action) => action.action === "moveMouse")
+				? captureUnchangedCurrentTarget(target)
+				: editedRefs
+					? await captureEditedTargets(target, baseView.outline, editedRefs, signal)
+					: await captureCurrentTargetAuto("act_ui", signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+			execution.evidence = { ...execution.evidence, successorObservationMs: Date.now() - successorStartedAt };
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
+			const observedTransition = changesBetween(baseView.outline, capture.outline);
+			execution.evidence = {
+				...execution.evidence,
+				successorChangedNodeCount: observedTransition.changedNodeCount,
+				...(observedTransition.changedNodeCount > 0 || (execution.rootDelta?.length ?? 0) > 0
+					? { implicitPostcondition: "successor_state_changed" }
+					: {}),
+			};
+			execution.outcome = outcomeAfterObservedTransition(
+				execution.outcome ?? "unknown",
+				executedActions,
+				observedTransition.changedNodeCount,
+				execution.rootDelta?.length ?? 0,
+			);
 			for (const action of executedActions) {
 				state.currentNote = noteAfterAct(state.currentNote ?? noteBefore, action.ref, capture.outline, { window: noteWindowForTarget(capture.target, capture.look), rootDelta: execution.rootDelta });
 			}
@@ -2006,7 +2394,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 			}
 			return await terminalDesktopActionResult(target, baseView.stateId, execution, error, condition);
 		}
-	});
+	}, guards.length ? async () => await assertDesktopLiveGuards(target, resourceKey, guards, signal) : undefined);
 }
 
 async function performBrowserTransaction(params: ActParams, actions: UiAction[], signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
@@ -2016,7 +2404,13 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 	if (!baseSnapshot) throw new Error("Browser transaction requires a complete base observation.");
 	const baseView = { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline };
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
+	const guards = validatedGuards(params.guards, restoreOutline(baseSnapshot.outline));
 	if (condition) conditionScopeNode(restoreOutline(baseSnapshot.outline), condition);
+	const visualSideEffect = actions.some((action) => action.action === "drag" || (action.action === "click" && !action.ref));
+	if (visualSideEffect && !condition) throw new Error("Browser coordinate click and drag actions require expect so SCUA can verify their effect.");
+	const desiredWasPreexisting = condition
+		? outlineConditionPresent(restoreOutline(baseSnapshot.outline), condition) !== condition.gone
+		: false;
 	const prepared = actions.map((action) => {
 		if (!BROWSER_TRANSACTION_ACTIONS.has(action.action)) throw new Error(`Browser transactions do not support '${action.action}'.`);
 		if (action.action === "click" && action.ref && action.button && action.button !== "left") throw new Error("Browser ref clicks support only the left button; use coordinate clicks for right or middle buttons.");
@@ -2027,43 +2421,108 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 		if (action.ref && (!target || target.contextId !== contextId)) throw new Error(`Browser ${action.action} ref must be owned by ${params.stateId}.`);
 		return { action, target };
 	});
+	const guardedResourceKey = `cdp:${baseSnapshot.targetId}`;
 	return await withBrowserWrite(contextId, async () => {
-		for (const { action, target } of prepared) {
-			let worked = false;
-			if (action.action === "press" || (action.action === "click" && action.ref)) {
-				worked = true;
-				for (let count = 0; count < (action.clickCount ?? 1); count += 1) worked = await cdpClickForContext(contextId, target!.backendNodeId!) && worked;
-			} else if (action.action === "click") {
-				worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mousePressed", action.button ?? "left", action.clickCount ?? 1)
-					&& await cdpMouseForContext(contextId, action.x!, action.y!, "mouseReleased", action.button ?? "left", action.clickCount ?? 1);
-			} else if (action.action === "setText") worked = await cdpTypeForContext(contextId, target!.backendNodeId!, action.text ?? "", true);
-			else if (action.action === "typeText") worked = target?.backendNodeId
-				? await cdpTypeForContext(contextId, target.backendNodeId, action.text ?? "", false)
-				: await cdpTypeFocusedForContext(contextId, action.text ?? "");
-			else if (action.action === "keypress") worked = await cdpKeypressForContext(contextId, action.keys ?? []);
-			else if (action.action === "scroll") worked = await cdpScrollForContext(contextId, toFiniteNumber(action.scrollX, 0), toFiniteNumber(action.scrollY, 0), target?.backendNodeId);
-			else if (action.action === "drag") worked = await cdpDragForContext(contextId, normalizeActionPath(action.path));
-			else if (action.action === "moveMouse") worked = await cdpMouseForContext(contextId, action.x!, action.y!, "mouseMoved");
-			if (!worked) throw new Error("The browser root became unavailable during the action transaction. Observe it again.");
+		const executionMode = currentExecutionMode();
+		const execution = executionTrace("act", "stealth", {
+			delivery: "cdp",
+			deliveryPolicy: "background",
+			executionMode,
+			foregrounded: false,
+			outcome: "unknown",
+			actionCount: prepared.length,
+			backgroundFirst: true,
+			evidence: { baseStateId: baseSnapshot.snapshotId, contextId, dispatchedActions: 0 },
+		});
+		let mutationGeneration = condition && !desiredWasPreexisting
+			? await cdpMutationGenerationForContext(contextId)
+			: undefined;
+		const deliveryStartedAt = Date.now();
+		const deliverActions = async () => {
+			for (const { action, target } of prepared) {
+				try {
+					const worked = await cdpPerformActionForContext(contextId, visualAgentId(), action, target?.backendNodeId);
+					if (!worked) throw new Error("CDP could not deliver the action to its target.");
+					(execution.evidence as Record<string, unknown>).dispatchedActions = Number((execution.evidence as Record<string, unknown>).dispatchedActions) + 1;
+				} catch (error) {
+					const dispatchedActions = Number((execution.evidence as Record<string, unknown>).dispatchedActions);
+					const wrapped = new Error(error instanceof Error ? error.message : String(error)) as Error & { code: string; delivery: string; resourceKey: string; evidence: Record<string, unknown> };
+					wrapped.name = "BrowserDeliveryError";
+					wrapped.code = "browser_delivery_failed";
+					wrapped.delivery = dispatchedActions > 0 ? "may_have_been_delivered" : "definitely_not_delivered";
+					wrapped.resourceKey = `cdp:${baseSnapshot.targetId}`;
+					wrapped.evidence = { ...execution.evidence, failedActionIndex: dispatchedActions, failedAction: action.action };
+					throw wrapped;
+				}
+			}
+		};
+		if (executionMode === "foreground") {
+			const presented = await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => {
+				if (!await cdpBringToFrontForContext(contextId)) throw new Error("SCUA could not bring the controlled browser tab to the foreground.");
+				const browserRoots = await currentPlatformBackend.listRoots({ title: baseSnapshot.title }, signal);
+				const browserRoot = browserRoots.find((root) => root.pid && currentPlatformBackend.isChromeFamilyApp(root.appName ?? "", root.bundleId));
+				if (browserRoot) {
+					const focused = await currentPlatformBackend.focusWindow({ pid: browserRoot.pid, windowId: browserRoot.windowId, rootRef: browserRoot.rootRef ?? browserRoot.windowRef }, signal);
+					if (!focused.focused) throw new Error("SCUA selected the browser tab but could not activate its native window.");
+				}
+				await deliverActions();
+				return true;
+			});
+			execution.foregrounded = presented.value;
+		} else {
+			await deliverActions();
 		}
+		(execution.evidence as Record<string, unknown>).deliveryMs = Date.now() - deliveryStartedAt;
+		let satisfied = false;
+		let finalSnapshot: CdpPageSnapshot | undefined;
 		if (condition) {
+			const verificationStartedAt = Date.now();
 			const deadline = Date.now() + condition.timeoutMs;
-			let satisfied = false;
 			do {
-				const snapshot = await cdpSnapshotForContext(contextId);
-				if (!snapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
-				const present = outlineConditionPresent(restoreOutline(snapshot.outline), condition);
+				finalSnapshot = await cdpSnapshotForContext(contextId);
+				if (!finalSnapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
+				const present = outlineConditionPresent(restoreOutline(finalSnapshot.outline), condition);
 				satisfied = present !== condition.gone;
-				if (!satisfied) await sleep(100, signal);
+				if (!satisfied && Date.now() < deadline) {
+					throwIfAborted(signal);
+					const remaining = deadline - Date.now();
+					const nextGeneration = await cdpWaitForMutationForContext(contextId, mutationGeneration ?? 0, remaining, signal);
+					if (nextGeneration === undefined) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
+					mutationGeneration = nextGeneration;
+				}
 			} while (!satisfied && Date.now() < deadline);
-			if (!satisfied) throw new Error(`The browser action was delivered but its postcondition was not satisfied within ${condition.timeoutMs}ms.`);
+			execution.verification = {
+				status: satisfied ? (desiredWasPreexisting ? "preexisting" : "verified") : "failed",
+				text: condition.text,
+				role: condition.role,
+				value: condition.value,
+				gone: condition.gone || undefined,
+				timeoutMs: condition.timeoutMs,
+			};
+			execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", execution.verification.status);
+			if (!satisfied) {
+				execution.error = { code: "postcondition_failed", message: `The browser action was delivered but its postcondition was not satisfied within ${condition.timeoutMs}ms.` };
+			}
+			(execution.evidence as Record<string, unknown>).verificationMs = Date.now() - verificationStartedAt;
 		}
-		return await refreshBrowserSnapshot(contextId, "act_ui", baseView);
-	});
-}
-
-function normalizeActionPath(path: UiAction["path"]): Array<{ x: number; y: number }> {
-	return (path ?? []).map((point) => Array.isArray(point) ? { x: toFiniteNumber(point[0], 0), y: toFiniteNumber(point[1], 0) } : { x: toFiniteNumber(point.x, 0), y: toFiniteNumber(point.y, 0) });
+		const successorStartedAt = Date.now();
+		if (!finalSnapshot) finalSnapshot = await cdpSnapshotForContext(contextId);
+		if (!finalSnapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
+		const state = operationState();
+		const resourceKey = state.resourceKey ?? `cdp:${finalSnapshot.targetId}`;
+		const successor = browserObservationResult(finalSnapshot, resourceKey, state.epoch ?? resourceScheduler.epoch(resourceKey), "act_ui", baseView, execution);
+		(execution.evidence as Record<string, unknown>).successorObservationMs = Date.now() - successorStartedAt;
+		if (!condition) {
+			const successorOutline = restoreOutline(successor.details.outline);
+			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", actions, (ref) => nodeByRef(successorOutline, ref)?.value);
+			const observedTransition = changesBetween(restoreOutline(baseView.outline), successorOutline);
+			(execution.evidence as Record<string, unknown>).successorChangedNodeCount = observedTransition.changedNodeCount;
+			if (observedTransition.changedNodeCount > 0) (execution.evidence as Record<string, unknown>).implicitPostcondition = "successor_state_changed";
+			execution.outcome = outcomeAfterObservedTransition(execution.outcome ?? "unknown", actions, observedTransition.changedNodeCount);
+		}
+		(execution.evidence as Record<string, unknown>).successorStateId = successor.details.stateId;
+		return successor;
+	}, guards.length ? async () => await assertBrowserLiveGuards(contextId, guardedResourceKey, guards) : undefined);
 }
 
 function validateActionTarget(action: UiAction): void {
@@ -2183,39 +2642,65 @@ async function waitForCdpPort(port: number, signal?: AbortSignal): Promise<void>
 	throw new Error(`Managed browser did not expose CDP on port ${port} within ${MANAGED_BROWSER_READY_TIMEOUT_MS}ms.`);
 }
 
+function macosAppBundleForExecutable(executable: string): string | undefined {
+	const marker = ".app/Contents/MacOS/";
+	const index = executable.indexOf(marker);
+	return index >= 0 ? executable.slice(0, index + ".app".length) : undefined;
+}
+
 // Side effects: starts a Pi-managed browser process, replaces any previous managed browser,
 // and sets PI_COMPUTER_USE_CDP_PORT for subsequent CDP context discovery.
-async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
+async function performLaunchBrowserUnlocked(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
 	const browser = getComputerUseConfig().managed_browser;
-	const executable = await managedBrowserExecutable(browser);
-	const port = await freeTcpPort();
 	const requestedUrl = trimOrUndefined(params.url);
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
+	if (runtimeState.managedBrowserCdpPort) {
+		const page = await createCdpPageContext(url).catch(() => undefined);
+		if (page) {
+			const resourceKey = `cdp:${page.targetId}`;
+			runtimeState.browserOwnerByContext.set(page.contextId, currentActorId());
+			claimCurrentActorResource(resourceKey);
+			const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
+			if (!scheduled.value) throw new Error("The new managed browser page could not be observed.");
+			return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+		}
+		await closeCdpBrowser(runtimeState.managedBrowserCdpPort);
+	}
+	const executable = await managedBrowserExecutable(browser);
+	const port = await freeTcpPort();
 	const profileDir = path.join(os.tmpdir(), `pi-${browser}-cdp-${port}`);
 	disconnectCdp();
-	runtimeState.managedBrowser?.kill("SIGTERM");
+	if (runtimeState.managedBrowser?.exitCode === null) runtimeState.managedBrowser.kill("SIGTERM");
+	if (runtimeState.managedBrowserProfileDir) await rm(runtimeState.managedBrowserProfileDir, { force: true, recursive: true }).catch(() => undefined);
 	const args = [
 		`--remote-debugging-port=${port}`,
 		`--user-data-dir=${profileDir}`,
+		"--no-startup-window",
 		"--no-first-run",
 		"--no-default-browser-check",
-		url,
 	];
 	if (runtimeState.previousCdpPort === undefined && runtimeState.managedBrowserCdpPort === undefined) {
 		runtimeState.previousCdpPort = process.env.PI_COMPUTER_USE_CDP_PORT;
 	}
-	const managedBrowser = spawn(executable, args, { stdio: "ignore", detached: false });
+	const appBundle = process.platform === "darwin" ? macosAppBundleForExecutable(executable) : undefined;
+	const managedBrowser = appBundle
+		? spawn("/usr/bin/open", ["-n", "-g", appBundle, "--args", ...args], { stdio: "ignore", detached: false })
+		: spawn(executable, args, { stdio: "ignore", detached: false });
 	managedBrowser.unref();
 	runtimeState.managedBrowser = managedBrowser;
 	runtimeState.managedBrowserCdpPort = String(port);
+	runtimeState.managedBrowserProfileDir = profileDir;
 	process.env.PI_COMPUTER_USE_CDP_PORT = String(port);
 	try {
 		await waitForCdpPort(port, signal);
 	} catch (error) {
 		if (runtimeState.managedBrowser === managedBrowser) {
 			runtimeState.managedBrowser = undefined;
-			managedBrowser.kill("SIGTERM");
+			await closeCdpBrowser(String(port));
+			if (managedBrowser.exitCode === null) managedBrowser.kill("SIGTERM");
+			runtimeState.managedBrowserProfileDir = undefined;
+			await rm(profileDir, { force: true, recursive: true }).catch(() => undefined);
 			if (runtimeState.previousCdpPort === undefined) delete process.env.PI_COMPUTER_USE_CDP_PORT;
 			else process.env.PI_COMPUTER_USE_CDP_PORT = runtimeState.previousCdpPort;
 			runtimeState.managedBrowserCdpPort = undefined;
@@ -2223,12 +2708,19 @@ async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortS
 		}
 		throw error;
 	}
-	const page = (await listCdpPageContexts())[0];
-	if (!page) throw new Error("Managed browser launched without a CDP page context.");
+	const page = await createCdpPageContext(url);
+	if (!page) throw new Error("Managed browser launched but could not create its isolated page context.");
 	const resourceKey = `cdp:${page.targetId}`;
+	runtimeState.browserOwnerByContext.set(page.contextId, currentActorId());
+	claimCurrentActorResource(resourceKey);
 	const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
 	if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
 	return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+}
+
+async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
+	const scheduled = await resourceScheduler.read(`managed-browser:${SCUA_AGENT_ID}`, async () => await performLaunchBrowserUnlocked(params, signal));
+	return scheduled.value;
 }
 
 async function performNavigateBrowser(params: NavigateBrowserParams): Promise<AgentToolResult<BrowserObservationDetails>> {
@@ -2239,9 +2731,15 @@ async function performNavigateBrowser(params: NavigateBrowserParams): Promise<Ag
 	const baseSnapshot = operationState().browserSnapshot;
 	if (!baseSnapshot) throw new Error("Browser navigation requires a complete base observation.");
 	return await withBrowserWrite(contextId, async () => {
+		const execution = executionTrace("cdp_navigate", "stealth", { delivery: "cdp", deliveryPolicy: "background", outcome: "unknown", evidence: { requestedUrl: url, baseUrl: baseSnapshot.url } });
 		const ok = await cdpNavigateContext(contextId, url);
 		if (!ok) throw new Error(`Browser context '${contextId}' is no longer available. Observe it again.`);
-		return await refreshBrowserSnapshot(contextId, "navigate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline });
+		const successor = await refreshBrowserSnapshot(contextId, "navigate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline }, execution);
+		const changed = successor.details.root.url !== baseSnapshot.url;
+		execution.verification = { status: changed ? "verified" : "preexisting", timeoutMs: 10_000 };
+		execution.outcome = outcomeAfterCheck(execution.outcome ?? "unknown", execution.verification.status);
+		(execution.evidence as Record<string, unknown>).successorUrl = successor.details.root.url;
+		return successor;
 	});
 }
 
@@ -2253,9 +2751,11 @@ async function performEvaluateBrowser(params: EvaluateBrowserParams): Promise<Ag
 	const baseSnapshot = operationState().browserSnapshot;
 	if (!baseSnapshot) throw new Error("Browser evaluation requires a complete base observation.");
 	return await withBrowserWrite(contextId, async () => {
+		const execution = executionTrace("cdp_evaluate", "stealth", { delivery: "cdp", deliveryPolicy: "background", outcome: "unknown", evidence: { baseStateId: baseSnapshot.snapshotId } });
 		const result = await cdpEvaluateForContext(contextId, expression);
 		if (!result) throw new Error(`Browser context '${contextId}' is no longer available. Observe it again.`);
-		const successor = await refreshBrowserSnapshot(contextId, "evaluate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline });
+		const successor = await refreshBrowserSnapshot(contextId, "evaluate_browser", { stateId: baseSnapshot.snapshotId, outline: baseSnapshot.outline }, execution);
+		execution.evidence = { ...execution.evidence, evaluationReturned: true, successorStateId: successor.details.stateId };
 		const details: EvaluateBrowserDetails = {
 			tool: "evaluate_browser",
 			baseStateId: baseSnapshot.snapshotId,
@@ -2390,13 +2890,13 @@ export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 		};
 		if (details.outline?.root && typeof details.outline.lookId === "string") {
 			const epoch = 0;
-			resourceScheduler.restoreEpoch(resourceKey, epoch);
 			savedStates.set({
 				stateId: capture.stateId,
 				resourceKey,
 				epoch,
 				value: {
 					kind: "desktop",
+					actorId: currentActorId(),
 					target,
 					capture,
 					outline: details.outline,

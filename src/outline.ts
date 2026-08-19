@@ -416,7 +416,15 @@ function actionMatches(node: OutlineNode, action: string): boolean {
 }
 
 function normalizedSearchRole(value: string): string {
-	return value.trim().toLowerCase().replace(/^ax/, "").replace(/[ _-]+/g, "");
+	const normalized = value.trim().toLowerCase().replace(/^ax/, "").replace(/[ _-]+/g, "");
+	// Present one cross-platform vocabulary to callers while preserving native
+	// roles in snapshots. macOS exposes several editable roles where browser AX
+	// uses `textbox`, and `radio` versus `AXRadioButton` is another common seam.
+	if (["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"].includes(normalized)) return "textbox";
+	if (["radio", "radiobutton"].includes(normalized)) return "radio";
+	if (["check", "checkbox"].includes(normalized)) return "checkbox";
+	if (["menuitem", "menuitemradio", "menuitemcheckbox"].includes(normalized)) return "menuitem";
+	return normalized;
 }
 
 function damerauLevenshtein(a: string, b: string): number {

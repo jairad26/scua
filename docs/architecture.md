@@ -23,6 +23,7 @@ The implementation keeps that ownership explicit:
 | `state.ts` | Saved UI states, request-local state, restoration, and serialization |
 | `actions.ts` | Validation, normalization, target resolution, dependent focus, and safe retry eligibility |
 | `bridge.ts` | Tool coordination and resource scheduling |
+| `control-plane.ts` | Logical actors, budgets, durable ownership, handoff fencing, and lifecycle traces |
 | `view.ts` | Stable public refs and full-versus-changes rendering |
 | `outline.ts` | Parsing and querying complete UI trees |
 | `platform/*` | OS observation, input mechanics, and native protocol translation |
@@ -56,7 +57,7 @@ Desktop scheduling is conservatively keyed by process rather than window because
 
 ## Observation and progressive disclosure
 
-`observe_ui` asks the selected backend for one look. A desktop look combines root identity, accessibility structure, optional image evidence, OCR boxes when required, and capture metadata. A browser look converts the CDP accessibility tree into the same serialized outline shape.
+`observe_ui` asks the selected backend for one look. Automatic desktop observation is semantic-first: it obtains the Accessibility outline without ScreenCaptureKit/JPEG work, then captures an image and OCR only for explicit visual mode or a sparse/unlabeled semantic root. A browser look converts the CDP accessibility tree into the same serialized outline shape.
 
 The bridge stores the complete observation and returns a folded rendering. The state owns its refs:
 
@@ -112,6 +113,40 @@ With `headless: true`, the background boundary is strict: Pi must never activate
 
 The agent-facing `act_ui.headless` flag determines whether foreground execution is prohibited. Fallback-capable multi-action calls execute one checked action at a time, retain click-established focus, and stop on a checked `didnt`; strict-headless calls retain native transactional batching.
 
+## Adaptive execution plans
+
+The MCP coordinator can compose `act_ui` transactions into an adaptive action
+DAG. This moves deterministic scheduling into SCUA without moving task
+decomposition or application knowledge into the engine. The planner declares
+dependencies, immutable input states, live guards, actions, postconditions,
+and a bounded conflict policy. Ready nodes execute concurrently up to the plan
+limit; `stateFrom` passes one predecessor's successor state to a dependent
+node.
+
+A write is admitted in this order:
+
+```text
+acquire resource and hierarchical claims
+  -> verify the state's resource epoch
+  -> verify live UI guards
+  -> advance the epoch
+  -> dispatch and verify the action
+```
+
+Consequently, an epoch or guard conflict is definitely not delivered and can
+refresh only its own branch. A postcondition failure, cancellation after
+dispatch, or unknown outcome may have changed the UI and is never replayed.
+Descendants of a failed node are blocked, while unrelated branches continue.
+Waiting and refresh happen outside leases so one conflicted branch cannot
+freeze independent work.
+
+The external user is never locked out. Background semantic work continues
+without taking attention where the platform supports it; foreground work still
+uses the single global attention lease. Live guards make relevant user or app
+changes an optimistic-concurrency conflict rather than letting a stale plan
+continue blindly. They do not suppress physical input or claim that a desktop
+can provide database-level isolation from its user.
+
 ## Successor diffs
 
 Complete observations remain immutable and bounded internally. The initial observation renders a folded full view. After a mutation, `view.ts` stabilizes public refs using confident native identities, saves the complete resulting state, and compares it with the base state. Small trustworthy results render `added`, `updated`, and `removed` nodes plus the next `stateId`. Root appearance, closure, and focus changes remain part of the run result.
@@ -122,9 +157,31 @@ Diff rendering falls back to a full folded view when the root identity changes, 
 
 Browser pages are roots, not a second agent-facing context hierarchy. `launch_browser` returns browser-page `@r` refs; `observe_ui` returns their normal outline and `stateId`. `read_text`, `wait_for`, `act_ui`, `navigate_browser`, and `evaluate_browser` derive the CDP target from that state. Internal CDP target identifiers never need to be copied between public tools.
 
+Target connections persist across actions and observations. Browser waits use
+a page-local mutation notification as a wake-up hint, retain a bounded full-AX
+fallback for accessibility-only/canvas/iframe changes, and create one final
+authoritative immutable successor rather than fetching the full tree every
+100–200 milliseconds.
+
+## Logical actors and ownership
+
+One MCP coordinator can host many logical actors without spawning one MCP or
+browser process per actor. `actor_session` issues an actor ID and unguessable
+capability token. An external orchestrator supplies that token in MCP request
+metadata; ordinary UI action schemas contain no actor-ID escape hatch.
+
+`claim_resource` acquires, renews, releases, or atomically hands off a generic
+desktop/CDP resource. Claims are durable across calls and separate from the
+short operation leases used by the cross-process scheduler. In-flight mutation
+fencing prevents release or handoff during delivery. States are actor-scoped,
+bounded to 64 per actor and 512 globally, so a recipient must observe after
+handoff. Actor action/time budgets, cancellation records, and a bounded event
+trace let an RLM, workflow engine, or ordinary program coordinate work without
+SCUA embedding its planning policy.
+
 ## Native transports
 
-The macOS socket server and Windows line protocol accept multiple in-flight requests and correlate responses by request id. macOS protects shared AX ref/look stores and the root-event sequence; Windows uses a fixed worker pool and initializes UIA per worker thread. Both platforms keep eight immutable native look records and serialize global physical input. Target focus, bounded occlusion preflight, and HID delivery share that same critical section; another worker cannot change the foreground between validation and delivery. UIA-only Windows batches do not acquire the global physical-input lock, while any batch that may fall back to pointer or keyboard delivery holds it for the complete transaction.
+The macOS socket server and Windows line protocol accept multiple in-flight requests and correlate responses by request id. macOS protects shared AX ref/look stores and the root-event sequence; Windows uses a fixed worker pool and initializes UIA per worker thread. macOS keeps 512 immutable native look records; other backends retain bounded platform-specific stores. All serialize global physical input. Target focus, bounded occlusion preflight, and HID delivery share that same critical section; another worker cannot change the foreground between validation and delivery. UIA-only Windows batches do not acquire the global physical-input lock, while any batch that may fall back to pointer or keyboard delivery holds it for the complete transaction.
 
 The Linux helper is a local JSON-lines child process with correlated concurrent requests. It snapshots roots over AT-SPI2 and attempts semantic `Action`/`EditableText` delivery first. On X11, EWMH enriches root identity/focus, XComposite (with `GetImage` fallback) supplies PNG capture, and non-headless policies may use serialized XTEST physical input. Strict headless/background policy blocks XTEST and focus. Wayland diagnostics only reads portal version and capability properties; no portal session, capture, or input path is implemented.
 

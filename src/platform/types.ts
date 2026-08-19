@@ -90,6 +90,8 @@ export interface PlatformFrontmostResult {
 export interface PlatformFocusWindowResult {
 	focused: boolean;
 	alreadyFocused?: boolean;
+	activated?: boolean;
+	raised?: boolean;
 	reason?: string;
 }
 
@@ -152,6 +154,8 @@ export type PlatformPoint = { x: number; y: number };
 
 export interface PlatformActRequestBase {
 	lookId: string;
+	/** Stable identity for one agent process; visual cursors and native diagnostics must not collapse agents sharing an app. */
+	agentId?: string;
 	pid?: number;
 	target: PlatformActTarget;
 	policy: PlatformDeliveryPolicy;

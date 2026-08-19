@@ -1,7 +1,7 @@
 {
-	"name": "@injaneity/pi-computer-use",
+	"name": "@jairad26/scua",
 	"version": "0.5.0",
-	"description": "Pi extension that lets AI agents observe and control macOS, Windows, and Linux apps.",
+	"description": "State-scoped semantic computer use with isolated roots, shared leases, and independent agent cursors.",
 	"type": "module",
 	"keywords": [
 		"pi-package",
@@ -16,18 +16,22 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/injaneity/pi-computer-use.git"
+		"url": "git+https://github.com/jairad26/scua.git"
 	},
 	"bugs": {
-		"url": "https://github.com/injaneity/pi-computer-use/issues"
+		"url": "https://github.com/jairad26/scua/issues"
 	},
-	"homepage": "https://github.com/injaneity/pi-computer-use#readme",
+	"homepage": "https://github.com/jairad26/scua#readme",
 	"engines": {
 		"node": ">=20.6.0"
 	},
 	"files": [
+		".codex-plugin",
+		".mcp.json",
 		"extensions",
+		"mcp",
 		"src",
+		"scripts/run-mcp.sh",
 		"scripts/build-native.mjs",
 		"scripts/setup-helper.mjs",
 		"native/macos/bridge.swift",
@@ -52,18 +56,30 @@
 	},
 	"scripts": {
 		"postinstall": "node scripts/setup-helper.mjs --postinstall",
+		"mcp": "node mcp/server.ts",
 		"typecheck": "tsc -p tsconfig.json",
 		"test:schema": "node scripts/check-tool-schemas.mjs",
 		"test:invariants": "node scripts/check-invariants.mjs",
+		"test:config": "node scripts/check-config.mjs",
 		"test:lifecycle": "tsx scripts/check-session-lifecycle.mjs",
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",
+		"test:control-plane": "tsx scripts/check-control-plane.mjs",
+		"test:action-plan": "tsx scripts/check-action-plan.mjs",
+		"test:cdp": "tsx scripts/check-cdp-runtime.mjs",
+		"test:multi-agent-live": "SCUA_MULTI_AGENT_LIVE=1 node scripts/check-multi-agent-live.mjs",
+		"test:logical-actors-live": "SCUA_LOGICAL_ACTORS_LIVE=1 node scripts/check-logical-actors-live.mjs",
+		"test:doc-ock-live": "SCUA_DOC_OCK_LIVE=1 node scripts/check-doc-ock-live.mjs",
+		"test:doc-ock-showcase-live": "SCUA_DOC_OCK_SHOWCASE_LIVE=1 node scripts/check-doc-ock-showcase-live.mjs",
 		"test:output": "tsx scripts/check-bounded-output.mjs",
 		"test:commits": "node scripts/check-commit-messages.mjs",
 		"test:platform": "tsx scripts/check-platform-windows.mjs",
 		"test:windows-scripts": "node scripts/check-windows-build-scripts.mjs",
 		"test:signing": "node scripts/check-local-signing.mjs",
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
-		"test": "npm run typecheck && npm run test:schema && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
+		"test": "npm run typecheck && npm run test:config && npm run test:schema && npm run test:mcp && npm run test:mcp-compact && npm run test:package-files && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:control-plane && npm run test:action-plan && npm run test:cdp && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
+		"test:mcp": "node scripts/check-mcp-server.mjs",
+		"test:mcp-compact": "node scripts/check-mcp-compact.mjs",
+		"test:package-files": "node scripts/check-package-files.mjs",
 		"build:native": "node scripts/build-native.mjs",
 		"build:windows": "node scripts/build-native.mjs --platform windows",
 		"build:linux": "node scripts/build-native.mjs --platform linux",
