@@ -21,6 +21,7 @@ import { ResourceScheduler } from "./runtime.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { claimCurrentActorResource, currentActorId, withCurrentActorMutation } from "./control-plane.ts";
+import { assertUserQuietPeriod, UserActiveError, waitForUserQuietPeriod, type UserActivitySnapshot } from "./user-activity.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
 
@@ -1318,9 +1319,52 @@ function assertHeadlessDelivery(result: HelperActResult, headless: boolean): voi
 	for (const step of result.steps ?? []) assertHeadlessDelivery(step, headless);
 }
 
-async function withForegroundAttention<T>(target: ResolvedTarget, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-	const scheduled = await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => {
+async function physicalUserActivity(signal?: AbortSignal): Promise<UserActivitySnapshot> {
+	if (!currentPlatformBackend.getUserActivity) {
+		return { idleForMs: Number.POSITIVE_INFINITY, monitoringMode: "hid_system_timer" };
+	}
+	return await currentPlatformBackend.getUserActivity(signal);
+}
+
+function isUserActiveError(error: unknown): boolean {
+	return error instanceof UserActiveError || Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "user_active");
+}
+
+/** User-idle waiting happens outside the global attention lease. Once leased,
+ * a no-wait recheck closes the queueing gap; new physical input releases
+ * attention immediately and begins another bounded wait. */
+async function withForegroundUserPriority<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	const config = getComputerUseConfig();
+	const quietPeriodMs = config.user_quiet_period_ms;
+	if (quietPeriodMs <= 0 || !currentPlatformBackend.getUserActivity) {
+		return (await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => await work())).value;
+	}
+	const deadline = Date.now() + config.user_activity_timeout_ms;
+	for (;;) {
 		throwIfAborted(signal);
+		await waitForUserQuietPeriod(() => physicalUserActivity(signal), {
+			quietPeriodMs,
+			timeoutMs: Math.max(0, deadline - Date.now()),
+			signal,
+		});
+		try {
+			const scheduled = await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => {
+				throwIfAborted(signal);
+				await assertUserQuietPeriod(() => physicalUserActivity(signal), quietPeriodMs);
+				return await work();
+			});
+			return scheduled.value;
+		} catch (error) {
+			if (!isUserActiveError(error) || Date.now() >= deadline) throw error;
+			// The native boundary can observe input after the TypeScript recheck.
+			// user_active proves no foreground/HID action was delivered, so retrying
+			// this checked section after yielding is safe.
+		}
+	}
+}
+
+async function withForegroundAttention<T>(target: ResolvedTarget, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+	return await withForegroundUserPriority(async () => {
 		const focused = await currentPlatformBackend.focusWindow({
 			pid: target.pid,
 			windowId: target.windowId,
@@ -1328,8 +1372,7 @@ async function withForegroundAttention<T>(target: ResolvedTarget, work: () => Pr
 		}, signal);
 		if (!focused.focused) throw new Error(`SCUA could not bring ${target.appName} — ${target.windowTitle} to the foreground.`);
 		return await work();
-	});
-	return scheduled.value;
+	}, signal);
 }
 
 async function helperAct(
@@ -1415,7 +1458,7 @@ async function helperAct(
 function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, policy = currentDeliveryPolicy()): PlatformActRequest {
 	const look = currentLookOrThrow();
 	const delivery = nativeInputDelivery(policy);
-	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy };
+	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy, userQuietPeriodMs: policy === "foreground" ? getComputerUseConfig().user_quiet_period_ms : 0 };
 	return (() => {
 		switch (action.action) {
 			case "press":
@@ -2439,7 +2482,7 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 			}
 		};
 		if (executionMode === "foreground") {
-			const presented = await resourceScheduler.read(FOREGROUND_ATTENTION_RESOURCE_KEY, async () => {
+			const presented = await withForegroundUserPriority(async () => {
 				if (!await cdpBringToFrontForContext(contextId)) throw new Error("SCUA could not bring the controlled browser tab to the foreground.");
 				const browserRoots = await currentPlatformBackend.listRoots({ title: baseSnapshot.title }, signal);
 				const browserRoot = browserRoots.find((root) => root.pid && currentPlatformBackend.isChromeFamilyApp(root.appName ?? "", root.bundleId));
@@ -2447,10 +2490,11 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 					const focused = await currentPlatformBackend.focusWindow({ pid: browserRoot.pid, windowId: browserRoot.windowId, rootRef: browserRoot.rootRef ?? browserRoot.windowRef }, signal);
 					if (!focused.focused) throw new Error("SCUA selected the browser tab but could not activate its native window.");
 				}
+				await assertUserQuietPeriod(() => physicalUserActivity(signal), getComputerUseConfig().user_quiet_period_ms);
 				await deliverActions();
 				return true;
-			});
-			execution.foregrounded = presented.value;
+			}, signal);
+			execution.foregrounded = presented;
 		} else {
 			await deliverActions();
 		}

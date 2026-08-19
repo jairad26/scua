@@ -18,6 +18,7 @@ export function scuaErrorEnvelope(error: unknown, cancelled = false): ScuaErrorE
 	const message = error instanceof Error ? error.message : String(error);
 	const enriched = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
 	if (typeof enriched?.code === "string" && (enriched.delivery === "definitely_not_delivered" || enriched.delivery === "may_have_been_delivered")) {
+		const declaredRecovery = enriched.recovery;
 		return {
 			code: enriched.code,
 			message,
@@ -25,9 +26,14 @@ export function scuaErrorEnvelope(error: unknown, cancelled = false): ScuaErrorE
 			resourceKey: typeof enriched.resourceKey === "string" ? enriched.resourceKey : undefined,
 			retryable: enriched.delivery === "definitely_not_delivered",
 			delivery: enriched.delivery,
-			recovery: enriched.delivery === "definitely_not_delivered" ? "reobserve" : "abort",
+			recovery: declaredRecovery === "reobserve" || declaredRecovery === "reacquire" || declaredRecovery === "unsupported" || declaredRecovery === "abort"
+				? declaredRecovery
+				: enriched.delivery === "definitely_not_delivered" ? "reobserve" : "abort",
 			evidence: enriched.evidence && typeof enriched.evidence === "object" ? enriched.evidence as Record<string, unknown> : undefined,
 		};
+	}
+	if (enriched?.code === "user_active") {
+		return { code: "user_active", message, actorId: currentActorId(), retryable: true, delivery: "definitely_not_delivered", recovery: "reacquire" };
 	}
 	if (error instanceof StaleResourceStateError) {
 		return { code: "stale_state", message, actorId: currentActorId(), resourceKey: error.resourceKey, expectedEpoch: error.expectedEpoch, actualEpoch: error.actualEpoch, retryable: true, delivery: "definitely_not_delivered", recovery: "reobserve" };

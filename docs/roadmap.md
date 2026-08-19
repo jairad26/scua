@@ -19,8 +19,12 @@ The concrete engine work in this roadmap is now implemented:
   native mutations, including pre-existing and failed postconditions;
 - desktop states and mutations use conservative application-process epochs,
   so focus/menu/sheet/keyboard effects fence every window in the app;
-- foreground fallback is disabled and returned HID/activation/raise evidence
-  is rejected as a runtime invariant;
+- foreground fallback is attention-leased and configurable, while strict
+  headless mode rejects returned HID/activation/raise evidence as a runtime
+  invariant;
+- macOS physical-user activity has priority over foreground work through a
+  passive, synthetic-event-aware quiet-period monitor with native pre-delivery
+  rechecks and bounded yielding;
 - automatic desktop observation is semantic-first, with visual/OCR escalation
   only for explicit, sparse, or unlabeled roots;
 - CDP connections persist, waits use mutation notification plus a bounded
@@ -216,11 +220,11 @@ postconditions, bounded concurrency, and bounded refresh policy. It reuses
 engine.
 
 Remaining acceptance work is empirical: benchmark complete real-application
-plans, keep ordinary non-research branches within the 5–10 second product
-target, and add a native physical-user quiet-period signal only if foreground
-contention evidence shows that live semantic guards plus the attention lease
-are insufficient. Such a signal must distinguish tagged SCUA input from actual
-user input and must wait outside all resource leases.
+plans and keep ordinary non-research branches within the 5–10 second product
+target. The native physical-user quiet-period signal is implemented: it
+distinguishes tagged SCUA input from actual user input, waits outside all
+resource leases, rechecks immediately before foreground/HID delivery, and
+fails definitely-not-delivered if the user remains active.
 
 ### P1: return typed errors and retry guidance
 

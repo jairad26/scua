@@ -1,7 +1,7 @@
 import { getComputerUseConfig } from "../../config.ts";
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
-import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
+import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformUserActivitySnapshot, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
 import { macosHelper } from "./helper.ts";
 
 function parseApps(result: unknown): PlatformApp[] {
@@ -69,7 +69,7 @@ function helperAction(request: PlatformActRequest): Record<string, unknown> {
 	return { ...request, target: request.target.focus, params: { ...request.params, preserveFocus: true } };
 }
 
-export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
+export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "getUserActivity" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
 	},
@@ -96,8 +96,16 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 		};
 	},
 
+	async getUserActivity(signal?: AbortSignal): Promise<PlatformUserActivitySnapshot> {
+		const result = await macosHelper.command<any>("getUserActivity", {}, { signal });
+		return {
+			idleForMs: Math.max(0, toFiniteNumber(result?.idleForMs, 0)),
+			monitoringMode: result?.monitoringMode === "listen_only" ? "listen_only" : "hid_system_timer",
+		};
+	},
+
 	async focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult> {
-		return await macosHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target }, { signal });
+		return await macosHelper.command<PlatformFocusWindowResult>("focusWindow", { ...target, userQuietPeriodMs: getComputerUseConfig().user_quiet_period_ms }, { signal });
 	},
 
 	async observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse> {
@@ -113,12 +121,12 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
-		return await macosHelper.command<HelperActResult>("act", { ...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay }, options);
+		return await macosHelper.command<HelperActResult>("act", { ...helperAction(request), cursorOverlay: getComputerUseConfig().cursor_overlay, userQuietPeriodMs: request.userQuietPeriodMs ?? getComputerUseConfig().user_quiet_period_ms }, options);
 	},
 
 	async actBatch(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult> {
 		const cursorOverlay = getComputerUseConfig().cursor_overlay;
-		return await macosHelper.command<HelperActResult>("actBatch", { actions: requests.map((request) => ({ ...helperAction(request), cursorOverlay })) }, options);
+		return await macosHelper.command<HelperActResult>("actBatch", { actions: requests.map((request) => ({ ...helperAction(request), cursorOverlay, userQuietPeriodMs: request.userQuietPeriodMs ?? getComputerUseConfig().user_quiet_period_ms })) }, options);
 	},
 
 	async readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse> {

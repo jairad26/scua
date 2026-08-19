@@ -11,6 +11,7 @@ const macosPlatformBackend: ComputerUsePlatformBackend = {
 	listApps: macosBackend.listApps,
 	listRoots: macosBackend.listRoots,
 	getFrontmost: macosBackend.getFrontmost,
+	getUserActivity: macosBackend.getUserActivity,
 	focusWindow: macosBackend.focusWindow,
 	observe: macosBackend.observe,
 	act: macosBackend.act,

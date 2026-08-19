@@ -147,6 +147,15 @@ changes an optimistic-concurrency conflict rather than letting a stale plan
 continue blindly. They do not suppress physical input or claim that a desktop
 can provide database-level isolation from its user.
 
+On macOS, foreground admission additionally gives physical user activity
+priority. A passive Quartz monitor records hardware input while ignoring tagged
+SCUA events. Idle waiting occurs outside the attention lease; SCUA rechecks
+after acquiring attention and again in the native helper before activation and
+HID delivery. New activity releases attention and restarts a bounded wait. If
+the user remains active, `user_active` is returned as definitely not delivered,
+so no stale foreground action is replayed and unrelated background lanes keep
+running. The monitor never filters or suppresses input.
+
 ## Successor diffs
 
 Complete observations remain immutable and bounded internally. The initial observation renders a folded full view. After a mutation, `view.ts` stabilizes public refs using confident native identities, saves the complete resulting state, and compares it with the base state. Small trustworthy results render `added`, `updated`, and `removed` nodes plus the next `stateId`. Root appearance, closure, and focus changes remain part of the run result.

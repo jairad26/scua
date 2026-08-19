@@ -26,7 +26,9 @@ Example:
   "managed_browser": "chrome",
   "headless": false,
   "cursor_overlay": true,
-  "execution_mode": "background"
+  "execution_mode": "background",
+  "user_quiet_period_ms": 750,
+  "user_activity_timeout_ms": 5000
 }
 ```
 
@@ -68,6 +70,33 @@ Default: `true`
 
 When `true`, macOS pointer actions enqueue a click-through agent cursor animation to the native grounded point during non-headless background delivery. Foreground actions that control the physical cursor don't display the overlay. The overlay doesn't move the system pointer, accept input, or delay the action. Set it to `false` for invisible automation. `headless: true` always suppresses it regardless of this setting.
 
+### `user_quiet_period_ms`
+
+Default: `750`
+
+Before activating an application or delivering global HID input on macOS, SCUA
+waits until physical keyboard, mouse, scroll, and trackpad input has been quiet
+for this continuous interval. It checks once before requesting the global
+attention lease, again after acquiring it, and again inside the native helper
+before activation or HID delivery. Background Accessibility, process-targeted,
+and CDP work is not delayed. Set this to `0` only to disable physical-user
+priority explicitly.
+
+The helper prefers a passive listen-only Quartz event tap and tags its own
+synthetic input so it is not mistaken for user activity. The tap never modifies
+or discards events. If macOS does not permit passive monitoring, SCUA falls back
+to the hardware event-state timer. Enabling **Input Monitoring** for the helper
+improves synthetic-event discrimination but is not required for the fallback.
+
+### `user_activity_timeout_ms`
+
+Default: `5000`
+
+Maximum time one foreground section yields while the user remains active. If
+the budget expires, SCUA returns the typed `user_active` error with
+`definitely_not_delivered` delivery evidence and `reacquire` recovery guidance.
+Independent background work continues throughout the wait.
+
 ## Environment variables
 
 ```bash
@@ -83,6 +112,8 @@ PI_COMPUTER_USE_CURSOR_OVERLAY=0
 PI_COMPUTER_USE_CURSOR_OVERLAY=1
 PI_COMPUTER_USE_EXECUTION_MODE=background
 PI_COMPUTER_USE_EXECUTION_MODE=foreground
+PI_COMPUTER_USE_USER_QUIET_PERIOD_MS=750
+PI_COMPUTER_USE_USER_ACTIVITY_TIMEOUT_MS=5000
 PI_COMPUTER_USE_DELIVERY_POLICY=default
 PI_COMPUTER_USE_DELIVERY_POLICY=foreground
 PI_COMPUTER_USE_CDP_PORT=9222

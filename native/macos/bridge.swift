@@ -245,6 +245,126 @@ final class Box<T> {
 	}
 }
 
+private let scuaSyntheticEventMarker: Int64 = 0x53435541
+
+final class PhysicalUserActivityMonitor {
+	private let lock = NSLock()
+	private var eventTap: CFMachPort?
+	private var eventTapSource: CFRunLoopSource?
+	private var tapRunLoop: CFRunLoop?
+	private var startAttempted = false
+	private var lastUserInputUptime: TimeInterval
+
+	init() {
+		lastUserInputUptime = ProcessInfo.processInfo.systemUptime - Self.hardwareIdleSeconds()
+	}
+
+	private static let eventTypes: [CGEventType] = [
+		.keyDown, .keyUp, .flagsChanged,
+		.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+		.otherMouseDown, .otherMouseUp, .mouseMoved,
+		.leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+		.scrollWheel, .tabletPointer, .tabletProximity,
+	]
+
+	private static func hardwareIdleSeconds() -> TimeInterval {
+		let values = eventTypes.map {
+			CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0)
+		}.filter { $0.isFinite && $0 >= 0 }
+		return values.min() ?? 0
+	}
+
+	func status() -> [String: Any] {
+		ensureStarted()
+		lock.lock()
+		let listening = eventTap != nil && tapRunLoop != nil
+		let listenedIdle = max(0, ProcessInfo.processInfo.systemUptime - lastUserInputUptime)
+		lock.unlock()
+		let idleSeconds = listening ? listenedIdle : Self.hardwareIdleSeconds()
+		return [
+			"idleForMs": idleSeconds * 1_000,
+			"monitoringMode": listening ? "listen_only" : "hid_system_timer",
+		]
+	}
+
+	private func noteUserInput() {
+		lock.lock()
+		lastUserInputUptime = ProcessInfo.processInfo.systemUptime
+		lock.unlock()
+	}
+
+	private func ensureStarted() {
+		lock.lock()
+		if startAttempted {
+			lock.unlock()
+			return
+		}
+		startAttempted = true
+		lock.unlock()
+
+		let mask = Self.eventTypes.reduce(CGEventMask(0)) { partial, type in
+			partial | (CGEventMask(1) << CGEventMask(type.rawValue))
+		}
+		let callback: CGEventTapCallBack = { _proxy, type, event, userInfo in
+			guard let userInfo else { return Unmanaged.passUnretained(event) }
+			let monitor = Unmanaged<PhysicalUserActivityMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+			if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+				monitor.reenableTap()
+				return Unmanaged.passUnretained(event)
+			}
+			let marker = event.getIntegerValueField(.eventSourceUserData)
+			let sourcePid = event.getIntegerValueField(.eventSourceUnixProcessID)
+			if marker != scuaSyntheticEventMarker && sourcePid != Int64(getpid()) {
+				monitor.noteUserInput()
+			}
+			// Passive monitoring never modifies, delays, or discards user input.
+			return Unmanaged.passUnretained(event)
+		}
+		guard let tap = CGEvent.tapCreate(
+			tap: .cgSessionEventTap,
+			place: .headInsertEventTap,
+			options: .listenOnly,
+			eventsOfInterest: mask,
+			callback: callback,
+			userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+		) else {
+			return
+		}
+		lock.lock()
+		eventTap = tap
+		lock.unlock()
+		let thread = Thread { [weak self] in
+			guard let self else { return }
+			let runLoop = CFRunLoopGetCurrent()
+			let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+			self.lock.lock()
+			self.tapRunLoop = runLoop
+			self.eventTapSource = source
+			if let source { CFRunLoopAddSource(runLoop, source, .commonModes) }
+			CGEvent.tapEnable(tap: tap, enable: true)
+			self.lock.unlock()
+			CFRunLoopRun()
+		}
+		thread.name = "scua-physical-user-activity"
+		thread.start()
+		let deadline = Date().addingTimeInterval(0.5)
+		while Date() < deadline {
+			lock.lock()
+			let ready = tapRunLoop != nil
+			lock.unlock()
+			if ready { break }
+			Thread.sleep(forTimeInterval: 0.01)
+		}
+	}
+
+	private func reenableTap() {
+		lock.lock()
+		let tap = eventTap
+		lock.unlock()
+		if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+	}
+}
+
 final class InputSuppressionGuard {
 	static let maxSuppressionSeconds: TimeInterval = 30
 
@@ -389,6 +509,7 @@ final class Bridge {
 	private let protocolVersion = 12
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
+	private let physicalUserActivity = PhysicalUserActivityMonitor()
 	private let physicalInputLock = NSRecursiveLock()
 	private let supportsAgentCursor = CommandLine.arguments.contains("serve")
 	private let browserBundleIds: Set<String> = [
@@ -643,6 +764,8 @@ final class Bridge {
 			return try getFrontmost()
 		case "getUserContext":
 			return try getUserContext()
+		case "getUserActivity":
+			return physicalUserActivity.status()
 		case "beginInputSuppression":
 			return try beginInputSuppression()
 		case "endInputSuppression":
@@ -1042,6 +1165,19 @@ final class Bridge {
 		return ["active": false]
 	}
 
+	private func assertUserQuietPeriod(_ request: [String: Any]) throws {
+		let requiredMs = max(0, optionalIntArg(request, "userQuietPeriodMs") ?? 0)
+		guard requiredMs > 0 else { return }
+		let status = physicalUserActivity.status()
+		let idleForMs = (status["idleForMs"] as? NSNumber)?.doubleValue ?? 0
+		guard idleForMs >= Double(requiredMs) else {
+			throw BridgeFailure(
+				message: "Physical user input occurred (Int(idleForMs.rounded()))ms ago; foreground delivery requires (requiredMs)ms of quiet",
+				code: "user_active"
+			)
+		}
+	}
+
 	private func restoreUserFocus(_ request: [String: Any]) throws -> [String: Any] {
 		let pid = Int32(try intArg(request, "pid"))
 		let targetTitle = optionalStringArg(request, "windowTitle")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1116,6 +1252,7 @@ final class Bridge {
 		guard let app = NSRunningApplication(processIdentifier: pid) else {
 			return ["focused": false, "reason": "application_not_found"]
 		}
+		try assertUserQuietPeriod(request)
 		let wasActive = app.isActive
 		let activationRequested = wasActive ? true : app.activate()
 		if !wasActive { usleep(20_000) }
@@ -1939,10 +2076,17 @@ final class Bridge {
 		let deferRootDelta = (boolArg(request, "deferRootDelta") ?? false) || action == "moveMouse"
 		let delivery = policy == "background" ? "pid" : ((params["delivery"] as? String) == "pid" ? "pid" : "hid")
 		var holdsPhysicalInput = false
-		func acquirePhysicalInputIfNeeded() {
+		func acquirePhysicalInputIfNeeded() throws {
 			if delivery == "hid" && !holdsPhysicalInput {
 				physicalInputLock.lock()
 				holdsPhysicalInput = true
+				do {
+					try assertUserQuietPeriod(request)
+				} catch {
+					holdsPhysicalInput = false
+					physicalInputLock.unlock()
+					throw error
+				}
 			}
 		}
 		defer { if holdsPhysicalInput { physicalInputLock.unlock() } }
@@ -2071,9 +2215,10 @@ final class Bridge {
 			}
 			performed["grounding"] = "coordinates"
 			if delivery == "pid" { performed["verification"] = "caller_required" }
-			acquirePhysicalInputIfNeeded()
+			try acquirePhysicalInputIfNeeded()
 			focusTargetForPhysicalInput()
 			if delivery == "hid" { try preflight(point) }
+			if delivery == "hid" { try assertUserQuietPeriod(request) }
 			switch action {
 			case "press", "click":
 				animateCursor(at: point)
@@ -2165,7 +2310,7 @@ final class Bridge {
 				}
 			}
 			if insideWebArea {
-				acquirePhysicalInputIfNeeded()
+				try acquirePhysicalInputIfNeeded()
 				focusTargetForPhysicalInput()
 				_ = AXUIElementSetAttributeValue(targetElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				let currentValue = stringAttribute(targetElement, attribute: kAXValueAttribute as CFString) ?? ""
@@ -2173,10 +2318,12 @@ final class Bridge {
 				let selected = AXValueCreate(.cfRange, &range).map {
 					AXUIElementSetAttributeValue(targetElement, kAXSelectedTextRangeAttribute as CFString, $0) == .success
 				} ?? false
+				if delivery == "hid" { try assertUserQuietPeriod(request) }
 				if !selected {
 					try postKeyPress(keys: ["cmd", "a"], pid: pid, delivery: delivery)
 					usleep(20_000)
 				}
+				if delivery == "hid" { try assertUserQuietPeriod(request) }
 				try postAtomicUnicodeText(text, pid: pid, delivery: delivery)
 				usleep(40_000)
 				let verificationElement = refreshElement() ?? targetElement
@@ -2203,8 +2350,9 @@ final class Bridge {
 				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				if focused == .success { performed["focused"] = true }
 			}
-			acquirePhysicalInputIfNeeded()
+			try acquirePhysicalInputIfNeeded()
 			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
+			if delivery == "hid" { try assertUserQuietPeriod(request) }
 			let text = params["text"] as? String ?? ""
 			try postUnicodeText(text, pid: pid, delivery: delivery)
 			performed["grounding"] = "coordinates"
@@ -2237,8 +2385,9 @@ final class Bridge {
 					}
 				}
 			}
-			acquirePhysicalInputIfNeeded()
+			try acquirePhysicalInputIfNeeded()
 			if delivery == "hid" && !preserveFocus { focusTargetForPhysicalInput() }
+			if delivery == "hid" { try assertUserQuietPeriod(request) }
 			try postKeyPress(keys: keys, pid: pid, delivery: delivery)
 			performed["grounding"] = "coordinates"
 		} else if let element, action == "scroll" {
@@ -3484,22 +3633,17 @@ final class Bridge {
 		optionalStringArg(request, "delivery") == "pid" ? "pid" : "hid"
 	}
 
-	private func postEvent(_ event: CGEvent, pid: Int32, delivery: String = "hid") {
+	private func postEvent(_ event: CGEvent, pid: Int32, delivery: String = "hid") throws {
+		event.setIntegerValueField(.eventSourceUserData, value: scuaSyntheticEventMarker)
 		if delivery == "pid" {
 			event.postToPid(pid)
 			return
 		}
-		// Post as a real foreground HID event. AppKit views with mouseDown handlers
-		// can ignore pid-targeted CGEvents even though postToPid reports success.
-		// Keep the target app frontmost so the HID event is delivered to the intended
-		// window, then post at the session event tap.
-		if let app = NSRunningApplication(processIdentifier: pid), !app.isActive {
-			if #available(macOS 14.0, *) {
-				_ = app.activate()
-			} else {
-				_ = app.activate(options: [.activateIgnoringOtherApps])
-			}
-			usleep(20_000)
+		// Foreground acquisition happens at the checked action boundary. Never
+		// steal focus back here: if the user clicked away in the final race window,
+		// prove that no HID event was posted and yield.
+		guard let app = NSRunningApplication(processIdentifier: pid), app.isActive else {
+			throw BridgeFailure(message: "Physical user input changed the foreground target before delivery", code: "user_active")
 		}
 		event.post(tap: .cghidEventTap)
 	}
@@ -3510,7 +3654,7 @@ final class Bridge {
 		guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse move event", code: "input_failed")
 		}
-		postEvent(move, pid: pid, delivery: delivery)
+		try postEvent(move, pid: pid, delivery: delivery)
 	}
 
 	private func mouseButton(_ name: String) -> CGMouseButton {
@@ -3569,9 +3713,9 @@ final class Bridge {
 			}
 			down.setIntegerValueField(.mouseEventClickState, value: Int64(index))
 			up.setIntegerValueField(.mouseEventClickState, value: Int64(index))
-			postEvent(down, pid: pid, delivery: delivery)
+			try postEvent(down, pid: pid, delivery: delivery)
 			usleep(12_000)
-			postEvent(up, pid: pid, delivery: delivery)
+			try postEvent(up, pid: pid, delivery: delivery)
 			if index < clickCount {
 				usleep(70_000)
 			}
@@ -3588,14 +3732,14 @@ final class Bridge {
 		guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: first, mouseButton: .left) else {
 			throw BridgeFailure(message: "Failed to create mouse down event", code: "input_failed")
 		}
-		postEvent(down, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, delivery: delivery)
 		usleep(12_000)
 
 		for point in points.dropFirst() {
 			guard let drag = CGEvent(mouseEventSource: nil, mouseType: mouseDraggedType(for: .left), mouseCursorPosition: point, mouseButton: .left) else {
 				throw BridgeFailure(message: "Failed to create mouse drag event", code: "input_failed")
 			}
-			postEvent(drag, pid: pid, delivery: delivery)
+			try postEvent(drag, pid: pid, delivery: delivery)
 			usleep(8_000)
 		}
 
@@ -3604,7 +3748,7 @@ final class Bridge {
 		else {
 			throw BridgeFailure(message: "Failed to create mouse up event", code: "input_failed")
 		}
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(up, pid: pid, delivery: delivery)
 	}
 
 	private func postScrollWheel(at point: CGPoint, deltaX: Int, deltaY: Int, pid: Int32, delivery: String = "hid") throws {
@@ -3622,7 +3766,7 @@ final class Bridge {
 			throw BridgeFailure(message: "Failed to create scroll event", code: "input_failed")
 		}
 		event.location = point
-		postEvent(event, pid: pid, delivery: delivery)
+		try postEvent(event, pid: pid, delivery: delivery)
 	}
 
 	private func modifierFlag(_ key: String) -> CGEventFlags? {
@@ -3712,8 +3856,8 @@ final class Bridge {
 		}
 		down.flags = flags
 		up.flags = flags
-		postEvent(down, pid: pid, delivery: delivery)
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, delivery: delivery)
+		try postEvent(up, pid: pid, delivery: delivery)
 		usleep(8_000)
 	}
 
@@ -3733,8 +3877,8 @@ final class Bridge {
 			}
 			setUnicodeString(event: down, text: char)
 			setUnicodeString(event: up, text: char)
-			postEvent(down, pid: pid, delivery: delivery)
-			postEvent(up, pid: pid, delivery: delivery)
+			try postEvent(down, pid: pid, delivery: delivery)
+			try postEvent(up, pid: pid, delivery: delivery)
 			usleep(8_000)
 		}
 	}
@@ -3747,9 +3891,9 @@ final class Bridge {
 		else { throw BridgeFailure(message: "Failed to create unicode text event", code: "input_failed") }
 		setUnicodeString(event: down, text: text)
 		setUnicodeString(event: up, text: text)
-		postEvent(down, pid: pid, delivery: delivery)
+		try postEvent(down, pid: pid, delivery: delivery)
 		usleep(8_000)
-		postEvent(up, pid: pid, delivery: delivery)
+		try postEvent(up, pid: pid, delivery: delivery)
 	}
 
 	/// Prefer physical key codes for characters represented by the US layout.

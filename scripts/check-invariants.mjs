@@ -277,6 +277,20 @@ check("INV-17 macOS agent cursor and execution presentation stay independently c
 	assert(swift.includes("elementLimit = 64_000") && swift.includes("elements.removeValue(forKey: evicted)"), "macOS AX element refs are not bounded for the complete retained-state budget");
 });
 
+check("INV-17 physical user keeps foreground priority", () => {
+	const configTs = fs.readFileSync(path.join(root, "src/config.ts"), "utf8");
+	const activity = fs.readFileSync(path.join(root, "src/user-activity.ts"), "utf8");
+	const monitorStart = swift.indexOf("final class PhysicalUserActivityMonitor");
+	const monitorEnd = swift.indexOf("final class InputSuppressionGuard", monitorStart);
+	const monitor = swift.slice(monitorStart, monitorEnd);
+	assert(configTs.includes("user_quiet_period_ms: 750") && configTs.includes("user_activity_timeout_ms: 5_000"), "physical-user priority defaults changed unexpectedly");
+	assert(activity.includes('readonly code = "user_active"') && activity.includes('readonly delivery = "definitely_not_delivered"') && activity.includes('readonly recovery = "reacquire"'), "active-user yield is not typed as safely retryable");
+	assert(ts.includes("withForegroundUserPriority") && ts.includes("await assertUserQuietPeriod"), "foreground execution does not wait and recheck physical-user activity");
+	assert(monitor.includes("options: .listenOnly") && monitor.includes("Unmanaged.passUnretained(event)") && !monitor.includes("return nil"), "physical-user monitoring is not strictly passive");
+	assert(monitor.includes("eventSourceUserData") && swift.includes("scuaSyntheticEventMarker"), "SCUA synthetic events are not distinguishable from physical-user input");
+	assert(swift.includes("try assertUserQuietPeriod(request)") && swift.includes('code: "user_active"'), "native activation/HID delivery lacks a final physical-user quiet check");
+});
+
 check("INV-17 browser and native agent cursors share the filled high-contrast design", () => {
 	assert(cdpTs.includes("const AGENT_CURSOR_SVG"), "CDP cursor does not use the shared reference silhouette");
 	assert(cdpTs.includes('transform="translate(24 23) scale(2)"') && cdpTs.includes('fill="#0d0d0d" stroke="#ffffff" stroke-width="2.5"'), "CDP cursor geometry or colors diverge from the native cursor");

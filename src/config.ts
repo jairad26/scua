@@ -8,6 +8,8 @@ export interface ComputerUseConfig {
 	cursor_overlay: boolean;
 	execution_mode: "background" | "foreground";
 	managed_browser: "helium" | "chrome";
+	user_quiet_period_ms: number;
+	user_activity_timeout_ms: number;
 }
 
 export interface ComputerUseConfigSource {
@@ -29,6 +31,8 @@ const DEFAULT_CONFIG: ComputerUseConfig = {
 	cursor_overlay: true,
 	execution_mode: "background",
 	managed_browser: "chrome",
+	user_quiet_period_ms: 750,
+	user_activity_timeout_ms: 5_000,
 };
 
 let activeConfig: ComputerUseConfig = { ...DEFAULT_CONFIG };
@@ -42,6 +46,11 @@ function parseBoolean(value: unknown): boolean | undefined {
 	if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
 	if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
 	return undefined;
+}
+
+function boundedInteger(value: unknown, minimum: number, maximum: number): number | undefined {
+	const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+	return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed))) : undefined;
 }
 
 function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
@@ -58,6 +67,10 @@ function normalizePartial(raw: unknown): Partial<ComputerUseConfig> {
 	if (executionMode === "background" || executionMode === "foreground") out.execution_mode = executionMode;
 	const managedBrowser = (source as any).managed_browser;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
+	const userQuietPeriodMs = boundedInteger((source as any).user_quiet_period_ms, 0, 10_000);
+	const userActivityTimeoutMs = boundedInteger((source as any).user_activity_timeout_ms, 0, 60_000);
+	if (userQuietPeriodMs !== undefined) out.user_quiet_period_ms = userQuietPeriodMs;
+	if (userActivityTimeoutMs !== undefined) out.user_activity_timeout_ms = userActivityTimeoutMs;
 	return out;
 }
 
@@ -83,6 +96,10 @@ function readEnv(): Partial<ComputerUseConfig> {
 	if (executionMode === "background" || executionMode === "foreground") out.execution_mode = executionMode;
 	const managedBrowser = process.env.PI_COMPUTER_USE_MANAGED_BROWSER;
 	if (managedBrowser === "helium" || managedBrowser === "chrome") out.managed_browser = managedBrowser;
+	const userQuietPeriodMs = boundedInteger(process.env.PI_COMPUTER_USE_USER_QUIET_PERIOD_MS, 0, 10_000);
+	const userActivityTimeoutMs = boundedInteger(process.env.PI_COMPUTER_USE_USER_ACTIVITY_TIMEOUT_MS, 0, 60_000);
+	if (userQuietPeriodMs !== undefined) out.user_quiet_period_ms = userQuietPeriodMs;
+	if (userActivityTimeoutMs !== undefined) out.user_activity_timeout_ms = userActivityTimeoutMs;
 	return out;
 }
 

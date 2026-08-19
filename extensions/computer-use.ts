@@ -174,6 +174,8 @@ function formatConfigStatus(): string {
 		`headless: ${loaded.config.headless ? "enabled" : "disabled"}`,
 		`cursor_overlay: ${loaded.config.cursor_overlay ? "enabled" : "disabled"}`,
 		`execution_mode: ${loaded.config.execution_mode}`,
+		`user_quiet_period_ms: ${loaded.config.user_quiet_period_ms}`,
+		`user_activity_timeout_ms: ${loaded.config.user_activity_timeout_ms}`,
 		"",
 		"Sources:",
 		...loaded.sources.map((source) => `- ${source.path}: ${source.error ? `error: ${source.error}` : source.exists ? "loaded" : "not found"}`),

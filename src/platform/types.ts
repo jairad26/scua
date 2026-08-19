@@ -95,6 +95,11 @@ export interface PlatformFocusWindowResult {
 	reason?: string;
 }
 
+export interface PlatformUserActivitySnapshot {
+	idleForMs: number;
+	monitoringMode: "listen_only" | "hid_system_timer";
+}
+
 export interface HelperActPerformed {
 	grounding?: "description" | "coordinates" | "keyboard-events";
 	/** `ax` means the platform accessibility API (AX on macOS, UIA on Windows). */
@@ -159,6 +164,8 @@ export interface PlatformActRequestBase {
 	pid?: number;
 	target: PlatformActTarget;
 	policy: PlatformDeliveryPolicy;
+	/** Minimum hardware-user idle interval required before foreground/HID work. */
+	userQuietPeriodMs?: number;
 }
 
 export type PlatformActRequest = PlatformActRequestBase & (
@@ -213,6 +220,7 @@ export interface ComputerUsePlatformBackend {
 	listApps(signal?: AbortSignal): Promise<PlatformApp[]>;
 	listRoots(query: PlatformRootQuery, signal?: AbortSignal): Promise<PlatformRoot[]>;
 	getFrontmost(signal?: AbortSignal): Promise<PlatformFrontmostResult>;
+	getUserActivity?(signal?: AbortSignal): Promise<PlatformUserActivitySnapshot>;
 	focusWindow(target: PlatformTarget, signal?: AbortSignal): Promise<PlatformFocusWindowResult>;
 	observe(request: PlatformObserveRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<LookResponse>;
 	act(request: PlatformActRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;

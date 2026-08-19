@@ -38,6 +38,12 @@ fallback only when the action genuinely requires one. `foreground` mode makes
 every action visible by activating its target first. Strict `headless` mode
 forbids foreground activation and physical input entirely.
 
+Physical user input has priority over foreground automation on macOS. SCUA
+waits for a configurable quiet period before taking attention, rechecks at the
+native delivery boundary, and yields with a definitely-not-delivered result if
+the user remains active. It never suppresses keyboard, mouse, or trackpad input;
+background semantic work continues while foreground work waits.
+
 Independent application processes and browser-page targets have separate
 scheduling lanes. The macOS helper also maintains a distinct click-through
 cursor overlay per active resource, so concurrent work can remain visible

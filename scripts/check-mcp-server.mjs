@@ -74,6 +74,8 @@ try {
 
 	const launcher = readFileSync(path.join(root, "scripts/run-mcp.sh"), "utf8");
 	assert(launcher.includes('PI_COMPUTER_USE_EXECUTION_MODE="${PI_COMPUTER_USE_EXECUTION_MODE:-background}"'), "SCUA launcher does not expose background/foreground execution mode");
+	assert(launcher.includes('PI_COMPUTER_USE_USER_QUIET_PERIOD_MS="${PI_COMPUTER_USE_USER_QUIET_PERIOD_MS:-750}"'), "SCUA launcher does not enable physical-user quiet-period gating");
+	assert(launcher.includes('PI_COMPUTER_USE_USER_ACTIVITY_TIMEOUT_MS="${PI_COMPUTER_USE_USER_ACTIVITY_TIMEOUT_MS:-5000}"'), "SCUA launcher does not bound active-user yielding");
 	assert(launcher.includes('PI_COMPUTER_USE_CURSOR_OVERLAY="true"'), "SCUA launcher does not enable visual agent cursors");
 
 	send(3, "ping");

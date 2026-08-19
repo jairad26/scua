@@ -83,6 +83,13 @@ parallel workers from activating different applications between target focus
 and input delivery. Independent observations, cached searches, and successful
 background actions do not take that lease and continue in parallel.
 
+The physical user outranks that lease. On macOS, SCUA waits outside the lease
+for a continuous hardware-input quiet period, rechecks after admission, and
+checks again in the helper before activation or HID posting. A passive event
+tap ignores tagged SCUA-generated events and never filters user events; a
+hardware event-state timer is the permission-safe fallback. Continued user
+activity yields a typed, definitely-not-delivered `user_active` result.
+
 Each agent/window pair owns a separate cursor renderer and overlay window.
 Native overlays choose the display containing the target, remain above ordinary
 application windows, and cannot receive pointer or keyboard input. CDP roots
