@@ -1,0 +1,24 @@
+diff --git a/batch_run.py b/batch_run.py
+index 6cf9863..95e303f 100644
+--- a/batch_run.py
++++ b/batch_run.py
+@@ -13,5 +13,6 @@ from mm_agents.internvl_agent import InternvlAgent
+ from mm_agents.simple_qwenvl_agent import SimpleQwenvlAgent
+ from mm_agents.openclaw_agent import OpenClawAgent
++from mm_agents.scua_agent import ScuaAgent
+ from mm_agents.qwen3vl_agent import Qwen3VLAgent
+ from mm_agents.qwen3vl_agent_235B import Qwen3VLAgent as Qwen3VLAgent235B
+ from mm_agents.guiowl_agent import GUIOwlAgent
+@@ -35,6 +36,7 @@ MODEL_TYPE_LIST = {
+         model=model, url=url
+     ),
+     "openclaw": lambda model, url: OpenClawAgent(model=model, url=url),
++    "scua": lambda model, url: ScuaAgent(model=model, url=url),
+     "qwen3vl": lambda model, url: Qwen3VLAgent(
+         model=model, base_url=url, api_key=os.environ.get("QWEN3VL_API_KEY", "empty"),
+         platform="macos",
+@@ -171,3 +173,3 @@
+-    if isinstance(agent, OpenClawAgent):
++    if isinstance(agent, (OpenClawAgent, ScuaAgent)):
+         logger.info(
+             f"[OPENCLAW] Starting task {task_path} with result dir {domain_path}"
