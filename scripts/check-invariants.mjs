@@ -196,6 +196,14 @@ check("executor recovery and visual acknowledgement stay explicit", () => {
 	assert(cdpTs.includes("CdpCursorEvidence") && cdpTs.includes("overlayPresented"), "browser cursor overlay acknowledgement evidence is missing");
 });
 
+check("semantic observation continuations preserve eventual completeness", () => {
+	assert(swift.includes("AXUIElementGetAttributeValueCount") && swift.includes("AXUIElementCopyAttributeValues"), "large AX child arrays are not read through indexed pages");
+	assert(swift.includes('output["nextChildIndex"]') && swift.includes('output["childCount"]'), "native truncation does not expose a resumable continuation");
+	assert(swift.includes('code: "element_ref_expired"'), "native handle eviction can masquerade as a completed semantic index");
+	assert(ts.includes("crawlSemanticIndex") && ts.includes("semanticIndexes"), "background semantic indexing is missing");
+	assert(ts.includes("scopeChildOffset") && ts.includes("Semantic indexing continues in the background"), "query-triggered continuation state is not surfaced");
+});
+
 check("INV-11 unified agent contract", () => {
 	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
 	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);
@@ -498,7 +506,7 @@ async function liveChecks() {
 	try {
 		const socketPath = process.env.PI_CU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Caches/pi-computer-use/bridge.sock");
 		const diagnostics = await call(socketPath, { id: "inv-diagnostics", cmd: "diagnostics" });
-		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 11, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 13, `protocolVersion=${diagnostics.protocolVersion}`));
 		const broadDiscoveryStarted = Date.now();
 		const broadRoots = await call(socketPath, { id: "inv-broad-roots", cmd: "listRoots" }, 10000);
 		const broadDiscoveryMs = Date.now() - broadDiscoveryStarted;
@@ -506,13 +514,13 @@ async function liveChecks() {
 		check("LIVE broad root discovery is bounded and keeps helper alive", () => {
 			assert(Array.isArray(broadRoots?.roots), "broad listRoots did not return roots");
 			assert(broadDiscoveryMs < 10000, `broad listRoots took ${broadDiscoveryMs}ms`);
-			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 11, "helper did not survive broad listRoots");
+			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 13, "helper did not survive broad listRoots");
 		});
 		const abandonedRequestId = `inv-abandoned-roots-${process.pid}-${Date.now()}`;
 		await abandon(socketPath, { id: abandonedRequestId, cmd: "listRoots" });
 		const diagnosticsAfterAbandon = await waitForCompletedRequest(socketPath, abandonedRequestId);
 		check("LIVE abandoned root discovery keeps helper alive", () => {
-			assert(diagnosticsAfterAbandon.protocolVersion === 11, "helper died after writing to an abandoned root-discovery socket");
+			assert(diagnosticsAfterAbandon.protocolVersion === 13, "helper died after writing to an abandoned root-discovery socket");
 		});
 		const explicitWindowId = process.env.PI_CU_LIVE_WINDOW_ID ? Number(process.env.PI_CU_LIVE_WINDOW_ID) : undefined;
 		let windows = [];

@@ -14,6 +14,7 @@ surface; it is not a permanent allowlist.
 | Calendar | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
 | Notes | Harness available; semantic create/edit compatibility must be rerun after each macOS/helper change | Not claimed by this baseline | Not claimed by this baseline | Pending |
 | Spotify native app | Electron search textbox replacement through generic AX plus PID-targeted keyboard events | Yes (`pid`), without focus transfer | AX value plus resulting search content (`Raga of Madness`) | 2.2 s including fresh observations and result wait; action reported `worked` |
+| Spotify semantic-index torture run | Initial AX slice forced to 100 nodes; a target absent from that slice was discovered by continuation, then every live frontier was exhausted | Observation only | `search_ui` returned the target from a fresh immutable state; final index reported complete | Match at 208 indexed nodes in 0.20 s; complete at 524 nodes, 0 pending frontiers |
 | Second sparse/custom app | Select in the live harness | Not claimed | Not claimed | Pending |
 
 The native concurrency run used three processes and measured 2.92× overlap.
@@ -26,6 +27,12 @@ helper diagnostics completed in 9 ms without a connection race. A separate
 single-coordinator run placed three logical
 actors in one MCP process and one managed browser, measured 2.47× overlap, and
 verified atomic handoff/fresh-observation fencing.
+
+The semantic-index torture run intentionally lowered `SCUA_AX_NODE_LIMIT` to
+100. Spotify retired 184 virtualized Accessibility frontiers while the crawl
+was running; SCUA counted them as stale and completed the remaining currently
+accessible universe instead of aborting or silently treating a node budget as
+the full tree.
 
 ## Reproduction
 

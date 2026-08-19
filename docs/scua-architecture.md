@@ -55,11 +55,22 @@ search is cheaper than local embedding inference plus database lookup.
 
 The hot path therefore uses:
 
-1. one bounded native observation;
-2. one immutable in-memory outline, explicitly marked truncated when a slow AX
-   server reaches its bounded node or time budget;
-3. exact, prefix, substring, and conservative fuzzy ranking over that cache;
-4. scoped expansion or a new observation only when live evidence is required.
+1. one latency-bounded native observation;
+2. one immutable in-memory outline whose unfinished child arrays expose
+   resumable offsets;
+3. a background, epoch-fenced crawler that consumes every continuation and
+   builds an eventually complete semantic index without a total-node ceiling;
+4. exact, prefix, substring, and conservative fuzzy ranking over the latest
+   index revision; and
+5. a fresh state revision when a query adopts newly indexed nodes.
+
+The initial node/time budget controls time-to-first-result, not how much of the
+Accessibility tree SCUA may know. `search_ui` briefly follows the crawler on a
+cache miss and exposes completion, indexed-node, pending-frontier, revision,
+stale-frontier, and error status. Dynamic elements may disappear while their
+continuation is being read; those are counted and the remaining live tree keeps
+indexing. Expired native handles fail explicitly instead of masquerading as a
+complete index.
 
 A future local embedding model can be an optional reranker for ambiguous
 natural-language queries over the current cached outline. It must not become a

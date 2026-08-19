@@ -73,7 +73,23 @@ The bridge stores the complete observation and returns a folded rendering. The s
     @e12 text field
 ```
 
-`search_ui` and ordinary inspection are pure cached queries. A live escalation such as OCR or a refreshed truncated region is epoch-checked and resource-scheduled. It cannot silently graft data across a concurrent mutation.
+`search_ui` and ordinary inspection normally query immutable cached state. On
+macOS, the first Accessibility traversal is deliberately latency-bounded, but
+that budget is not a knowledge ceiling. Every unfinished child array carries a
+`childCount` and `nextChildIndex`; a resource-scheduled crawler resumes those
+frontiers in the background and grafts each page into an actor-, root-, and
+epoch-scoped semantic index. A cache miss waits briefly for that index and then
+adopts its latest immutable revision under a fresh `stateId`. `search_ui`
+reports whether the index is complete, how many nodes and frontiers it contains,
+and any explicit failure.
+
+The crawler continues until no frontier remains; it has no configured total-node
+or total-page ceiling. Its per-slice node/time budget exists only to preserve
+interactive latency. Resource epochs prevent a continuation from crossing a
+SCUA mutation. Dynamic Accessibility elements that disappear are recorded as
+stale frontiers, while native-handle exhaustion is an explicit error rather
+than silently turning a partial tree into a complete one. OCR and manual scoped
+refreshes use the same epoch-checked scheduling boundary.
 
 ## Acting and batching
 

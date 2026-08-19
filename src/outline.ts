@@ -38,6 +38,8 @@ export interface OutlineNode {
 	offscreen: boolean;
 	pictureOnly: boolean;
 	truncated: boolean;
+	childCount?: number;
+	nextChildIndex?: number;
 	scrollExtent?: OutlineScrollExtent;
 	text: OutlineText[];
 	children: OutlineNode[];
@@ -197,6 +199,8 @@ function parseNode(raw: unknown, parent?: OutlineNode): OutlineNode {
 		offscreen: toBoolean(record.offscreen),
 		pictureOnly: toBoolean(record.pictureOnly),
 		truncated: toBoolean(record.truncated),
+		childCount: Number.isFinite(toNumber(record.childCount, NaN)) ? Math.max(0, Math.trunc(toNumber(record.childCount))) : undefined,
+		nextChildIndex: Number.isFinite(toNumber(record.nextChildIndex, NaN)) ? Math.max(0, Math.trunc(toNumber(record.nextChildIndex))) : undefined,
 		scrollExtent: isRecord(record.scrollExtent)
 			? { seen: Math.max(0, Math.trunc(toNumber(record.scrollExtent.seen))), total: Math.max(0, Math.trunc(toNumber(record.scrollExtent.total))) }
 			: undefined,
@@ -594,7 +598,9 @@ function copyNodeFields(target: OutlineNode, source: OutlineNode, preserveWireRe
 	target.focused = source.focused;
 	target.offscreen = source.offscreen;
 	target.pictureOnly = source.pictureOnly;
-	target.truncated = false;
+	target.truncated = source.truncated;
+	target.childCount = source.childCount;
+	target.nextChildIndex = source.nextChildIndex;
 	target.scrollExtent = source.scrollExtent ? { ...source.scrollExtent } : undefined;
 	target.text = source.text.map((text) => ({ ...text, rect: text.rect ? { ...text.rect } : undefined }));
 }
@@ -631,7 +637,7 @@ function cloneForGraft(source: OutlineNode, parent: OutlineNode, nextRef: () => 
 	return node;
 }
 
-export function graftScopedOutline(outline: Outline, targetRef: string, scoped: Outline): OutlineNode {
+export function graftScopedOutline(outline: Outline, targetRef: string, scoped: Outline, options: { append?: boolean } = {}): OutlineNode {
 	const target = nodeByRef(outline, targetRef);
 	if (!target) throw new Error(`Cannot graft scoped outline: target ${targetRef} is not in the current outline.`);
 	const targetRect = target.rect ? { ...target.rect } : undefined;
@@ -652,7 +658,7 @@ export function graftScopedOutline(outline: Outline, targetRef: string, scoped: 
 	const preservedChildren = oldChildren
 		.map((child) => preserveUnreused(child, target, used))
 		.filter((child): child is OutlineNode => Boolean(child));
-	target.children = [...graftedChildren, ...preservedChildren];
+	target.children = options.append ? [...preservedChildren, ...graftedChildren] : [...graftedChildren, ...preservedChildren];
 	for (const child of target.children) clearScopedRects(child);
 	rebuildIndexes(outline);
 	return target;

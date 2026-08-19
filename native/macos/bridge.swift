@@ -23,13 +23,15 @@ final class AXRefStore {
 	private var windows: [String: AXUIElement] = [:]
 	private var elements: [String: AXUIElement] = [:]
 	private var snapshots: [String: Snapshot] = [:]
+	private var elementRefsByHash: [CFHashCode: [String]] = [:]
 	private var windowOrder: [String] = []
 	private var elementOrder: [String] = []
 	private let lock = NSLock()
 	private let windowLimit = 512
-	// SavedStates retains 32 observations and macOS captures at most 1,200
-	// elements by default. Keep enough native refs for every retained state,
-	// plus scoped expansions, while still bounding long-lived daemon memory.
+	// This is a storage bound for retained actionable handles, not an observation
+	// bound. Traversal continuations can exhaust an Accessibility tree; if a
+	// handle ever expires, callers receive element_ref_expired rather than a
+	// falsely complete semantic index.
 	private let elementLimit = 64_000
 
 	func storeWindow(_ window: AXUIElement) -> String {
@@ -53,14 +55,28 @@ final class AXRefStore {
 	func storeElement(_ element: AXUIElement, snapshot: Snapshot? = nil) -> String {
 		lock.lock()
 		defer { lock.unlock() }
+		let identity = CFHash(element)
+		if let refs = elementRefsByHash[identity] {
+			for ref in refs {
+				if let existing = elements[ref], CFEqual(existing, element) {
+					if let snapshot { snapshots[ref] = snapshot }
+					return ref
+				}
+			}
+		}
 		nextId += 1
 		let ref = "e\(nextId)"
 		elements[ref] = element
 		snapshots[ref] = snapshot
+		elementRefsByHash[identity, default: []].append(ref)
 		elementOrder.append(ref)
 		while elementOrder.count > elementLimit {
 			let evicted = elementOrder.removeFirst()
-			elements.removeValue(forKey: evicted)
+			if let removed = elements.removeValue(forKey: evicted) {
+				let removedIdentity = CFHash(removed)
+				elementRefsByHash[removedIdentity]?.removeAll { $0 == evicted }
+				if elementRefsByHash[removedIdentity]?.isEmpty == true { elementRefsByHash.removeValue(forKey: removedIdentity) }
+			}
 			snapshots.removeValue(forKey: evicted)
 		}
 		return ref
@@ -177,6 +193,8 @@ final class LookNode {
 	var offscreen: Bool
 	var pictureOnly: Bool
 	var truncated: Bool
+	var childCount: Int?
+	var nextChildIndex: Int?
 	var scrollExtent: [String: Int]?
 	var text: [[String: Any]]
 	var children: [LookNode]
@@ -203,6 +221,8 @@ final class LookNode {
 		self.offscreen = offscreen
 		self.pictureOnly = pictureOnly
 		self.truncated = false
+		self.childCount = nil
+		self.nextChildIndex = nil
 		self.text = []
 		self.children = []
 	}
@@ -231,6 +251,8 @@ final class LookNode {
 		if offscreen { output["offscreen"] = true }
 		if pictureOnly { output["pictureOnly"] = true }
 		if truncated { output["truncated"] = true }
+		if let childCount { output["childCount"] = childCount }
+		if let nextChildIndex { output["nextChildIndex"] = nextChildIndex }
 		if let scrollExtent { output["scrollExtent"] = scrollExtent }
 		if !text.isEmpty { output["text"] = text }
 		return output
@@ -506,7 +528,7 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
-	private let protocolVersion = 12
+	private let protocolVersion = 13
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let physicalUserActivity = PhysicalUserActivityMonitor()
@@ -1477,6 +1499,7 @@ final class Bridge {
 		let maxDimension = optionalIntArg(request, "maxDimension").map { max(1, $0) }
 		let readText = optionalStringArg(request, "readText") ?? "auto"
 		let baseLookId = optionalStringArg(request, "baseLookId")
+		let scopeChildOffset = max(0, optionalIntArg(request, "scopeChildOffset") ?? 0)
 		let includeImage = boolArg(request, "includeImage") ?? true
 		guard readText == "auto" || readText == "always" || readText == "never" else {
 			throw BridgeFailure(message: "readText must be auto, always, or never", code: "invalid_args")
@@ -1523,7 +1546,10 @@ final class Bridge {
 		}
 		let rootElement: AXUIElement
 		if let scopeRef = optionalStringArg(request, "scopeRef") {
-			guard let scoped = refStore.element(for: scopeRef), isElement(scoped, descendantOf: window) else {
+			guard let scoped = refStore.element(for: scopeRef) else {
+				throw BridgeFailure(message: "Scope ref expired from the native handle store", code: "element_ref_expired")
+			}
+			guard isElement(scoped, descendantOf: window) else {
 				throw BridgeFailure(message: "Scope ref is stale or outside the target root", code: "element_ref_invalid")
 			}
 			rootElement = scoped
@@ -1560,7 +1586,7 @@ final class Bridge {
 			transform = rectTransform(windowFrame: rootFrame, imageWidth: imageWidth, imageHeight: imageHeight)
 		}
 		let describeStart = Date()
-		let outline = buildLookOutline(root: rootElement, transform: transform)
+		let outline = buildLookOutline(root: rootElement, transform: transform, rootChildOffset: scopeChildOffset)
 		let describeMs = elapsedMs(describeStart)
 
 		var readTextMs = 0
@@ -1660,7 +1686,7 @@ final class Bridge {
 		return CGRect(x: x1, y: y1, width: max(0, x2 - x1), height: max(0, y2 - y1))
 	}
 
-	private func buildLookOutline(root: AXUIElement, transform: @escaping (CGRect) -> CGRect) -> LookNode {
+	private func buildLookOutline(root: AXUIElement, transform: @escaping (CGRect) -> CGRect, rootChildOffset: Int = 0) -> LookNode {
 		let rootNode = lookNode(element: root, transform: transform, offscreen: false)
 		let configuredNodeLimit = Int(ProcessInfo.processInfo.environment["SCUA_AX_NODE_LIMIT"] ?? "") ?? 1200
 		let configuredWalkMs = Int(ProcessInfo.processInfo.environment["SCUA_AX_WALK_MS"] ?? "") ?? 8000
@@ -1674,23 +1700,34 @@ final class Bridge {
 		// in Chromium/Electron application and menu graphs; CFHash follows AX
 		// element identity across those wrappers.
 		var seen = Set<CFHashCode>([CFHash(root)])
-		var queue: [(AXUIElement, LookNode)] = [(root, rootNode)]
+		var queue: [(element: AXUIElement, node: LookNode, childOffset: Int)] = [(root, rootNode, rootChildOffset)]
 		var index = 0
 		while index < queue.count {
-			let (element, node) = queue[index]
+			let frame = queue[index]
 			index += 1
-			let traversal = traversalChildSets(element)
-			let children = traversal.children
-			if children.isEmpty { continue }
+			let element = frame.element
+			let node = frame.node
 			if walked >= nodeLimit || Date() >= deadline {
 				node.truncated = true
+				node.nextChildIndex = frame.childOffset
+				break
+			}
+			let traversal = traversalChildPage(element, offset: frame.childOffset, maxValues: 64)
+			let children = traversal.children
+			node.childCount = traversal.total
+			if children.isEmpty {
+				node.truncated = false
+				node.nextChildIndex = nil
 				continue
 			}
+			var consumed = 0
 			for child in children {
 				if walked >= nodeLimit || Date() >= deadline {
 					node.truncated = true
+					node.nextChildIndex = frame.childOffset + consumed
 					break
 				}
+				consumed += 1
 				let identity = CFHash(child)
 				if seen.contains(identity) { continue }
 				seen.insert(identity)
@@ -1698,8 +1735,27 @@ final class Bridge {
 				let offscreen = childOffscreen(child, role: role, visibleByKind: traversal.visibleByKind)
 				let childNode = lookNode(element: child, transform: transform, offscreen: offscreen, knownRole: role)
 				node.children.append(childNode)
-				queue.append((child, childNode))
+				queue.append((child, childNode, 0))
 				walked += 1
+			}
+			let nextOffset = frame.childOffset + consumed
+			if nextOffset < traversal.total, node.nextChildIndex == nil {
+				// Continue the same child array before descending further. This keeps
+				// large sibling collections pageable and prevents an early subtree
+				// from making later siblings permanently unreachable.
+				node.truncated = true
+				node.nextChildIndex = nextOffset
+				queue.insert((element, node, nextOffset), at: index)
+			} else if nextOffset >= traversal.total {
+				node.truncated = false
+				node.nextChildIndex = nil
+			}
+		}
+		// Every unfinished queue entry is an explicit, resumable frontier.
+		if index < queue.count {
+			for pending in queue[index...] {
+				pending.node.truncated = true
+				pending.node.nextChildIndex = pending.childOffset
 			}
 		}
 		return rootNode
@@ -1782,6 +1838,44 @@ final class Bridge {
 		let values = copyMultipleAttributes(element, attributes: attributes)
 		return (
 			children: axElements(values[kAXChildrenAttribute as String]),
+			visibleByKind: [
+				"AXRow": optionalAXElements(values[kAXVisibleRowsAttribute as String]),
+				"AXColumn": optionalAXElements(values[kAXVisibleColumnsAttribute as String]),
+				"AXCell": optionalAXElements(values[kAXVisibleCellsAttribute as String]),
+				"*": optionalAXElements(values[kAXVisibleChildrenAttribute as String]),
+			]
+		)
+	}
+
+	private func traversalChildPage(_ element: AXUIElement, offset: Int, maxValues: Int) -> (children: [AXUIElement], total: Int, visibleByKind: [String: [AXUIElement]?]) {
+		let visibilityAttributes: [CFString] = [
+			kAXVisibleRowsAttribute as CFString,
+			kAXVisibleColumnsAttribute as CFString,
+			kAXVisibleCellsAttribute as CFString,
+			kAXVisibleChildrenAttribute as CFString,
+		]
+		let values = copyMultipleAttributes(element, attributes: visibilityAttributes)
+		var count: CFIndex = 0
+		let countStatus = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count)
+		var page: CFArray?
+		let boundedOffset = max(0, offset)
+		let requested = max(1, maxValues)
+		let pageStatus = countStatus == .success && boundedOffset < count
+			? AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, CFIndex(boundedOffset), CFIndex(requested), &page)
+			: AXError.noValue
+		let children: [AXUIElement]
+		let total: Int
+		if pageStatus == .success {
+			children = axElements(page)
+			total = Int(count)
+		} else {
+			let all = axElementArray(element, attribute: kAXChildrenAttribute as CFString)
+			total = all.count
+			children = boundedOffset < all.count ? Array(all.dropFirst(boundedOffset).prefix(requested)) : []
+		}
+		return (
+			children: children,
+			total: total,
 			visibleByKind: [
 				"AXRow": optionalAXElements(values[kAXVisibleRowsAttribute as String]),
 				"AXColumn": optionalAXElements(values[kAXVisibleColumnsAttribute as String]),

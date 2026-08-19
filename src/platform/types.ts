@@ -147,6 +147,8 @@ export interface PlatformObserveRequest {
 	baseLookId?: string;
 	readText: "auto" | "always" | "never";
 	scopeRef?: string;
+	/** Zero-based continuation within the scoped element's AXChildren array. */
+	scopeChildOffset?: number;
 	maxDimension?: number;
 	includeImage?: boolean;
 }

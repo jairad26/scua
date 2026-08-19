@@ -46,6 +46,15 @@ inspect_ui({ stateId, ref: "@e12" })
 
 `semantic` observation is cheapest, `fused` is the default, and `visual` forces visual text evidence. Search requires at least one of `text`, `role`, or `capability`. It ranks exact, prefix, and substring text before conservative fuzzy matches, returns a fixed top set with the total match count, and asks the caller to refine broad queries. Search can escalate OCR once when the original desktop look omitted it; that refresh is checked against the state's resource epoch.
 
+On macOS, a large Accessibility tree is returned quickly as an initial slice and
+then exhausted through background continuations. A cache-miss search waits up
+to the configured latency window for matching nodes and returns
+`details.semanticIndex` with `complete`, `indexedNodes`, `pendingFrontiers`,
+`revision`, `staleFrontiers`, and an optional `error`. If the search adopts a
+newer index revision, its returned `stateId` is the one to use for later
+inspection or action. There is no total semantic node cap; the native per-slice
+budget only prevents one traversal from monopolizing the helper.
+
 ## Acting and batching
 
 The public action shape is always transactional:

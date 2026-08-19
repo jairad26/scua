@@ -251,6 +251,7 @@ interface OutlineToolDetails {
 	matches?: SerializedOutlineSearchMatch[];
 	target?: SerializedOutlineNode;
 	note?: WindowNote;
+	semanticIndex?: { complete: boolean; indexedNodes: number; pendingFrontiers: number; revision: number; staleFrontiers: number; error?: string };
 }
 
 interface ResolvedTarget extends CurrentTarget {
@@ -260,6 +261,22 @@ interface ResolvedTarget extends CurrentTarget {
 	isOnscreen: boolean;
 	isMain: boolean;
 	isFocused: boolean;
+}
+
+interface SemanticIndexRecord {
+	key: string;
+	actorId: string;
+	resourceKey: string;
+	epoch: number;
+	target: ResolvedTarget;
+	outline: Outline;
+	lookId: string;
+	revision: number;
+	complete: boolean;
+	cancelled: boolean;
+	staleFrontiers: number;
+	running?: Promise<void>;
+	error?: string;
 }
 
 interface WindowRefRecord {
@@ -311,6 +328,7 @@ const AUTO_IMAGE_MAX_DIMENSION = 900;
 const EXPLICIT_IMAGE_MAX_DIMENSION = 1_600;
 const BROWSER_TRANSACTION_ACTIONS = new Set<UiAction["action"]>(["press", "click", "setText", "typeText", "keypress", "scroll", "drag", "moveMouse"]);
 const SCUA_AGENT_ID = process.env.SCUA_AGENT_ID?.trim() || randomUUID();
+const SEMANTIC_SEARCH_WAIT_MS = Math.max(100, Math.min(10_000, Number(process.env.SCUA_SEMANTIC_SEARCH_WAIT_MS ?? 2_000)));
 
 function visualAgentId(): string {
 	const actorId = currentActorId();
@@ -329,6 +347,7 @@ const runtimeState: RuntimeState = {
 
 const savedStates = new SavedStates();
 let resourceScheduler = new ResourceScheduler();
+const semanticIndexes = new Map<string, SemanticIndexRecord>();
 
 function operationState(): OperationState {
 	return savedStates.current();
@@ -345,8 +364,160 @@ function persistOperation(state: OperationState): void {
 	savedStates.saveDesktop(state, resourceKey, epoch);
 }
 
+function semanticIndexKey(actorId: string, resourceKey: string): string {
+	return `${actorId}\u0000${resourceKey}`;
+}
+
+function semanticFrontiers(outline: Outline): OutlineNode[] {
+	const containerRoles = new Set(["axwindow", "axwebarea", "axgroup", "axlist", "axtable", "axoutline", "axscrollarea", "axsplitgroup", "axtabgroup", "axtoolbar", "axsheet", "axdialog"]);
+	const score = (node: OutlineNode) => Number((node.nextChildIndex ?? 0) > 0) * 1_000
+		+ Number(node.focused) * 500
+		+ Number(containerRoles.has(node.role.toLowerCase())) * 200
+		+ Number(!node.offscreen) * 50
+		+ Number(node.canPress || node.canSetValue || node.canFocus) * 10;
+	return outline.nodes
+		.filter((node) => node.truncated && node.childCount !== 0 && Boolean(node.wireRef))
+		.sort((left, right) => score(right) - score(left));
+}
+
+function semanticIndexStatus(index: SemanticIndexRecord): NonNullable<OutlineToolDetails["semanticIndex"]> {
+	return {
+		complete: index.complete,
+		indexedNodes: index.outline.nodes.length,
+		pendingFrontiers: semanticFrontiers(index.outline).length,
+		revision: index.revision,
+		staleFrontiers: index.staleFrontiers,
+		...(index.error ? { error: index.error } : {}),
+	};
+}
+
+async function crawlSemanticIndex(index: SemanticIndexRecord): Promise<void> {
+	while (!index.cancelled && semanticIndexes.get(index.key) === index) {
+		const frontier = semanticFrontiers(index.outline)[0];
+		if (!frontier) {
+			index.complete = true;
+			index.revision += 1;
+			return;
+		}
+		if (resourceScheduler.epoch(index.resourceKey) !== index.epoch) {
+			index.error = "resource_epoch_changed";
+			return;
+		}
+		const childOffset = frontier.nextChildIndex ?? 0;
+		const beforeNodes = index.outline.nodes.length;
+		const beforeNext = frontier.nextChildIndex;
+		try {
+			const scoped = (await resourceScheduler.readAt(index.resourceKey, index.epoch, async () => await currentPlatformBackend.observe({
+				target: nativeWindowRequest(index.target),
+				baseLookId: index.lookId,
+				readText: "never",
+				scopeRef: frontier.wireRef,
+				scopeChildOffset: childOffset,
+				maxDimension: 1,
+				includeImage: false,
+			}, { timeoutMs: LOOK_TIMEOUT_MS }))).value;
+			if (!scoped.parsedOutline) throw new Error("Scoped semantic continuation returned no outline.");
+			graftScopedOutline(index.outline, frontier.ref, scoped.parsedOutline, { append: childOffset > 0 });
+			index.lookId = scoped.lookId;
+			index.outline.lookId = scoped.lookId;
+			index.revision += 1;
+			const refreshed = nodeByRef(index.outline, frontier.ref);
+			const advanced = index.outline.nodes.length > beforeNodes || refreshed?.nextChildIndex !== beforeNext || refreshed?.truncated === false;
+			if (!advanced) {
+				index.error = `semantic_continuation_stalled:${frontier.ref}`;
+				return;
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (/scope ref is stale|outside the target root|element_ref_invalid|invalid ui element/i.test(message)) {
+				// Dynamic/virtualized apps can retire an element between slices. It is
+				// no longer part of the accessible universe, so close that frontier and
+				// continue indexing the rest rather than poisoning the whole crawl.
+				frontier.truncated = false;
+				frontier.nextChildIndex = undefined;
+				frontier.childCount = frontier.children.length;
+				index.staleFrontiers += 1;
+				index.revision += 1;
+				continue;
+			}
+			index.error = message;
+			return;
+		}
+		// Yield between slices so observations/actions stay latency-first. This is
+		// scheduling, not an information cap: the frontier remains until consumed.
+		await sleep(10);
+	}
+}
+
+function seedSemanticIndex(result: CaptureResult, resourceKey: string, epoch: number): void {
+	if (currentPlatformBackend.name !== "macos") return;
+	const actorId = currentActorId();
+	const key = semanticIndexKey(actorId, resourceKey);
+	const previous = semanticIndexes.get(key);
+	if (previous) previous.cancelled = true;
+	const outline = restoreOutline(serializeOutline(result.outline));
+	const index: SemanticIndexRecord = {
+		key,
+		actorId,
+		resourceKey,
+		epoch,
+		target: { ...result.target },
+		outline,
+		lookId: result.look.lookId,
+		revision: 0,
+		complete: semanticFrontiers(outline).length === 0,
+		cancelled: false,
+		staleFrontiers: 0,
+	};
+	semanticIndexes.set(key, index);
+	if (!index.complete) {
+		index.running = new Promise<void>((resolve) => setTimeout(resolve, 0))
+			.then(async () => await crawlSemanticIndex(index))
+			.finally(() => { index.running = undefined; });
+	}
+}
+
+function semanticIndexForOperation(state: OperationState): SemanticIndexRecord | undefined {
+	if (!state.resourceKey || state.epoch === undefined || !state.currentTarget) return undefined;
+	const index = semanticIndexes.get(semanticIndexKey(currentActorId(), state.resourceKey));
+	return index && index.epoch === state.epoch && sameRootIdentity(index.target, state.currentTarget) ? index : undefined;
+}
+
+async function waitForSemanticIndex(index: SemanticIndexRecord, matches: (outline: Outline) => boolean, signal?: AbortSignal): Promise<void> {
+	const deadline = Date.now() + SEMANTIC_SEARCH_WAIT_MS;
+	let revision = -1;
+	while (!index.complete && !index.error && Date.now() < deadline) {
+		throwIfAborted(signal);
+		if (index.revision !== revision) {
+			revision = index.revision;
+			if (matches(index.outline)) return;
+		}
+		await sleep(20, signal);
+	}
+}
+
+function hasDefinitiveSearchMatch(outline: Outline, text?: string, role?: string, capability?: string): boolean {
+	const first = searchOutlineRanked(outline, text, role, capability, 1).matches[0];
+	return Boolean(first && first.matchReason !== "fuzzy");
+}
+
+function adoptSemanticIndex(state: OperationState, index: SemanticIndexRecord): Outline {
+	const current = state.currentOutline;
+	if (!current || index.outline.nodes.length <= current.nodes.length) return current ?? index.outline;
+	const outline = restoreOutline(serializeOutline(index.outline));
+	const stateId = randomUUID();
+	state.currentOutline = outline;
+	state.currentCapture = state.currentCapture ? { ...state.currentCapture, stateId, timestamp: Date.now() } : undefined;
+	if (state.currentLook) state.currentLook = { ...state.currentLook, lookId: index.lookId, outline: outline.root, parsedOutline: outline };
+	if (state.currentTarget) state.currentNote = noteFromLook(state.currentNote, outline, noteWindowForTarget(state.currentTarget, state.currentLook));
+	persistOperation(state);
+	return outline;
+}
+
 /** Release handles and state owned by the current Pi session. */
 export async function shutdownComputerUseSession(): Promise<void> {
+	for (const index of semanticIndexes.values()) index.cancelled = true;
+	semanticIndexes.clear();
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
 	await closeCdpBrowser(runtimeState.managedBrowserCdpPort);
@@ -1030,13 +1201,14 @@ function captureForLook(look: LookResponse): CurrentCapture {
 	};
 }
 
-async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; maxDimension?: number; includeImage?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
+async function performLook(target: ResolvedTarget, options: { readText: "auto" | "always" | "never"; baseLookId?: string; scopeRef?: string; scopeChildOffset?: number; maxDimension?: number; includeImage?: boolean }, signal?: AbortSignal): Promise<LookResponse> {
 	if ((!Number.isFinite(target.windowId) || target.windowId <= 0) && !target.nativeWindowRef) throw new Error(`Current platform requires a stable root id to observe '${target.windowTitle}'. Call find_roots and select a root with a stable id.`);
 	return await currentPlatformBackend.observe({
 		target: nativeWindowRequest(target),
 		baseLookId: options.baseLookId,
 		readText: options.readText,
 		scopeRef: options.scopeRef,
+		scopeChildOffset: options.scopeChildOffset,
 		maxDimension: options.maxDimension,
 		includeImage: options.includeImage,
 	}, { signal, timeoutMs: LOOK_TIMEOUT_MS });
@@ -1168,6 +1340,9 @@ async function buildToolResult(
 	base?: { stateId: string; outline: Outline },
 ): Promise<AgentToolResult<ComputerUseDetails>> {
 	const state = operationState();
+	const semanticResourceKey = state.resourceKey ?? desktopResourceKey(result.target);
+	const semanticEpoch = state.epoch ?? resourceScheduler.epoch(semanticResourceKey);
+	seedSemanticIndex(result, semanticResourceKey, semanticEpoch);
 	const fallbackReason = imageFallbackReason(tool, result, imageMode);
 	const transition = base ? changesBetween(base.outline, result.outline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
@@ -2047,6 +2222,15 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	let ranked = searchOutlineRanked(outline, text, role, capability, limit);
 	let matches = ranked.matches;
 	let escalatedOCR = false;
+	const semanticIndex = semanticIndexForOperation(state);
+	if (!hasDefinitiveSearchMatch(outline, text, role, capability) && semanticIndex && !semanticIndex.complete && !semanticIndex.error) {
+		await waitForSemanticIndex(semanticIndex, (candidate) => hasDefinitiveSearchMatch(candidate, text, role, capability), signal);
+	}
+	if (semanticIndex && semanticIndex.outline.nodes.length > outline.nodes.length) {
+		outline = adoptSemanticIndex(state, semanticIndex);
+		ranked = searchOutlineRanked(outline, text, role, capability, limit);
+		matches = ranked.matches;
+	}
 	const look = state.currentLook;
 	// Browser roots own a CDP snapshot, not a desktop window. Never leak an
 	// empty/static browser search into desktop capture or OCR.
@@ -2065,13 +2249,16 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 		escalatedOCR = true;
 	}
 	const detailMatches = matches.map(serializeOutlineSearchMatch);
-	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, matches: detailMatches, totalMatches: ranked.totalMatches, returned: matches.length, hasMore: ranked.totalMatches > matches.length, note: state.currentNote };
+	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, matches: detailMatches, totalMatches: ranked.totalMatches, returned: matches.length, hasMore: ranked.totalMatches > matches.length, note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
 	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]\n  path: ${match.path}`);
 	const noteHeader = renderNote(state.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
 	const escalationText = escalatedOCR ? " OCR text was escalated for this search after the cached outline had no matches." : "";
+	const indexingText = semanticIndex && !semanticIndex.complete
+		? ` Semantic indexing continues in the background (${semanticIndex.outline.nodes.length} nodes indexed, ${semanticFrontiers(semanticIndex.outline).length} frontiers pending).`
+		: semanticIndex?.complete ? ` Semantic index complete at ${semanticIndex.outline.nodes.length} nodes.` : "";
 	const moreText = ranked.totalMatches > matches.length ? ` Refine the query to inspect ${ranked.totalMatches - matches.length} additional matches.` : "";
-	return { content: [{ type: "text", text: `${noteText}Found ${ranked.totalMatches} outline match${ranked.totalMatches === 1 ? "" : "es"}; returned ${matches.length}.${moreText}${escalationText}\n${lines.join("\n")}` }], details };
+	return { content: [{ type: "text", text: `${noteText}Found ${ranked.totalMatches} outline match${ranked.totalMatches === 1 ? "" : "es"}; returned ${matches.length}.${moreText}${escalationText}${indexingText}\n${lines.join("\n")}` }], details };
 }
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
@@ -2090,14 +2277,16 @@ async function performExpandUi(params: ExpandUiParams, signal?: AbortSignal): Pr
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		const targetWireRef = wireRefForNode(target);
 		if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
+		const childOffset = target.nextChildIndex ?? 0;
 		const scoped = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await performLook(currentTarget, {
 			readText: "auto",
 			baseLookId: outline.lookId,
 			scopeRef: targetWireRef,
+			scopeChildOffset: childOffset,
 			maxDimension: 1,
 			includeImage: false,
 		}, signal))).value;
-		target = graftScopedOutline(outline, target.ref, scoped.parsedOutline!);
+		target = graftScopedOutline(outline, target.ref, scoped.parsedOutline!, { append: childOffset > 0 });
 		outline.lookId = scoped.lookId;
 		state.currentOutline = outline;
 		state.currentLook = { ...scoped, image: state.currentLook?.image, outline: outline.root, parsedOutline: outline };

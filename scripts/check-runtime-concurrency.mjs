@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction } from "../src/actions.ts";
 import { searchMayEscalateToDesktopOcr, transactionNeedsVerifiedVisualDelivery } from "../src/bridge.ts";
-import { nodeByRef, parseLookResponse } from "../src/outline.ts";
+import { graftScopedOutline, nodeByRef, parseLookResponse } from "../src/outline.ts";
 import { rebindActParams, TargetRebindError } from "../src/rebind.ts";
 import { ResourceScheduler, StateStore, StaleResourceStateError } from "../src/runtime.ts";
 import { changesBetween, stabilizeRefs } from "../src/view.ts";
@@ -89,6 +89,36 @@ assert.equal(outcomeAfterObservedValues("didnt", [{ action: "setText", ref: "@e1
 assert.equal(outcomeAfterObservedTransition("unknown", [{ action: "press", ref: "@e1" }], 1), "worked", "a changed successor did not verify a semantic press");
 assert.equal(outcomeAfterObservedTransition("unknown", [{ action: "moveMouse", ref: "@e1" }], 1), "unknown", "visual cursor motion was incorrectly treated as a UI outcome");
 assert.equal(outcomeAfterObservedTransition("didnt", [{ action: "press", ref: "@e1" }], 1), "didnt", "implicit successor evidence overrode explicit negative evidence");
+
+const pagedBase = rawLook("paged-base", [{
+	ref: "paged-container",
+	role: "AXList",
+	title: "Large collection",
+	truncated: true,
+	childCount: 4,
+	nextChildIndex: 2,
+	children: [
+		{ ref: "page-item-0", role: "AXRow", title: "Item 0" },
+		{ ref: "page-item-1", role: "AXRow", title: "Item 1" },
+	],
+}]);
+const pagedTarget = pagedBase.parsedOutline.nodes.find((node) => node.wireRef === "paged-container");
+assert(pagedTarget, "paged continuation fixture was not parsed");
+assert.equal(pagedTarget.childCount, 4, "child count continuation metadata was lost");
+assert.equal(pagedTarget.nextChildIndex, 2, "next child continuation offset was lost");
+const pagedContinuation = rawLook("paged-continuation", [
+	{ ref: "page-item-2", role: "AXRow", title: "Item 2" },
+	{ ref: "page-item-3", role: "AXRow", title: "Item 3" },
+]);
+pagedContinuation.parsedOutline.root.role = "AXList";
+pagedContinuation.parsedOutline.root.title = "Large collection";
+pagedContinuation.parsedOutline.root.truncated = false;
+pagedContinuation.parsedOutline.root.childCount = 4;
+pagedContinuation.parsedOutline.root.nextChildIndex = undefined;
+graftScopedOutline(pagedBase.parsedOutline, pagedTarget.ref, pagedContinuation.parsedOutline, { append: true });
+assert.deepEqual(pagedTarget.children.map((node) => node.title), ["Item 0", "Item 1", "Item 2", "Item 3"], "continued child page did not append in source order");
+assert.equal(pagedTarget.truncated, false, "completed continuation remained truncated");
+assert.equal(pagedTarget.nextChildIndex, undefined, "completed continuation retained a stale offset");
 
 const rebindBase = rawLook("rebind-base", [
 	{ ref: "old-search", role: "AXTextField", title: "Search", identifier: "search-input", rect: { x: 100, y: 50, w: 300, h: 30 } },

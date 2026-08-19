@@ -69,6 +69,7 @@
 		"test:user-activity": "tsx scripts/check-user-activity.mjs",
 		"test:cdp": "tsx scripts/check-cdp-runtime.mjs",
 		"test:multi-agent-live": "SCUA_MULTI_AGENT_LIVE=1 node scripts/check-multi-agent-live.mjs",
+		"test:semantic-index-live": "SCUA_SEMANTIC_INDEX_LIVE=1 SCUA_AX_NODE_LIMIT=100 node scripts/check-semantic-index-live.mjs",
 		"test:logical-actors-live": "SCUA_LOGICAL_ACTORS_LIVE=1 node scripts/check-logical-actors-live.mjs",
 		"test:doc-ock-live": "SCUA_DOC_OCK_LIVE=1 node scripts/check-doc-ock-live.mjs",
 		"test:doc-ock-showcase-live": "SCUA_DOC_OCK_SHOWCASE_LIVE=1 node scripts/check-doc-ock-showcase-live.mjs",
