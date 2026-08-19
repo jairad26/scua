@@ -38,10 +38,15 @@ export interface ObserveParams extends ObserveTargetParams, StateTargetParams {
 	readText?: "auto" | "always" | "never";
 }
 
-export interface SearchUiParams extends StateTargetParams {
+export interface SearchUiQuery {
+	id?: string;
 	text?: string;
 	role?: string;
 	capability?: string;
+}
+
+export interface SearchUiParams extends StateTargetParams, SearchUiQuery {
+	queries?: SearchUiQuery[];
 }
 
 export interface ExpandUiParams extends StateTargetParams {

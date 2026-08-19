@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { summarizeCodexEvents } from "./lib/episode-metrics.mjs";
 
 const benchmarkRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CORE_SCUA_TOOLS = ["open_root", "find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "execute_plan", "wait_for"];
 
 function codexBinary() {
 	const candidates = [
@@ -21,7 +22,8 @@ export function benchmarkPrompt(instruction) {
 		"You are the planning layer in a controlled computer-use benchmark.",
 		"Complete the task using only tools from the SCUA MCP server.",
 		"Do not use shell, filesystem, browser plugins, AppleScript, direct APIs, or any non-SCUA tool. Benchmark setup and evaluation are handled externally.",
-		"Use find_roots/open_root, observe_ui, cached semantic queries, and checked act_ui operations. Verify the requested end state before finishing.",
+		"Use find_roots/open_root, observe_ui, batched search_ui queries, and one checked act_ui or execute_plan transaction whenever possible. For text edits, prefer a ref-scoped value expectation and include Enter only when the control exposes semantic confirmation.",
+		"Treat act_ui outcome=didnt, verification=failed, or a partially_failed execute_plan as failure unless a later checked mutation succeeds. A read-only search cannot turn a failed mutation into success.",
 		"If the task is impossible, stop without substituting another application.",
 		`Task: ${instruction}`,
 		'Your final line must be SCUA_BENCHMARK_RESULT {"status":"success"|"failure","summary":"brief evidence"}',
@@ -42,6 +44,9 @@ export async function runCodexEpisode({ instruction, model, timeoutMs = 180_000,
 		"--json",
 		"-c", `mcp_servers.scua.command=${JSON.stringify(mcpCommand)}`,
 		"-c", 'mcp_servers.scua.default_tools_approval_mode="approve"',
+		"-c", `mcp_servers.scua.enabled_tools=${JSON.stringify(CORE_SCUA_TOOLS)}`,
+		"-c", 'model_reasoning_effort="low"',
+		"-c", 'model_verbosity="low"',
 		...(model ? ["--model", model] : []),
 		benchmarkPrompt(instruction),
 	];

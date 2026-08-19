@@ -31,6 +31,7 @@ const localSigningLockPath = path.join(os.tmpdir(), `pi-computer-use-local-signi
 const args = new Set(process.argv.slice(2));
 const isPostinstall = args.has("--postinstall");
 const allowBuildFallback = args.has("--allow-build") || args.has("--runtime") || process.env.PI_COMPUTER_USE_ALLOW_BUILD === "1";
+const forceSourceBuild = args.has("--source-build");
 const allowLinuxBuildFallback = args.has("--allow-build") || process.env.PI_COMPUTER_USE_ALLOW_BUILD === "1";
 const allowAdhocUpdate = args.has("--allow-adhoc-update") || process.env.PI_COMPUTER_USE_ALLOW_ADHOC_UPDATE === "1";
 
@@ -570,6 +571,20 @@ async function setup() {
 	}
 
 	const arch = normalizeArch(process.arch);
+	if (forceSourceBuild) {
+		const tempPath = path.join(os.tmpdir(), `pi-computer-use-bridge-${process.pid}-${Date.now()}`);
+		try {
+			console.log("[pi-computer-use] building the installed helper from the current macOS sources...");
+			await buildHelper(arch, tempPath);
+			const installed = await installHelperApp(tempPath);
+			console.log(installed
+				? `[pi-computer-use] built and installed the current helper sources at ${helperAppPath}`
+				: `[pi-computer-use] installed helper already matches the current sources at ${helperAppPath}`);
+		} finally {
+			await fs.rm(tempPath, { force: true }).catch(() => {});
+		}
+		return;
+	}
 	// Prefer the release-signed universal bundle (one artifact for both
 	// arches, produced by .github/workflows/release.yml) over
 	// per-arch bundles, over loose binaries (dev fallback).

@@ -57,11 +57,6 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 	if (action.ref?.trim()) {
 		const node = env.node(action.ref.trim());
 		const semanticClick = operation === "click" || operation === "press";
-		if (semanticClick && node.isTextInput) {
-			const point = env.center(node);
-			env.validatePoint(point.x, point.y);
-			return point;
-		}
 		const onlyIncidentalActions = node.actions.every((candidate) => candidate === "AXShowMenu" || candidate === "AXScrollToVisible");
 		if (node.wireRef && !node.pictureOnly && (!semanticClick || node.canPress || node.canFocus || node.canSetValue || !onlyIncidentalActions)) {
 			return { ref: node.wireRef };
@@ -80,9 +75,11 @@ function nativeTarget(action: UiAction, operation: PreparedAction["action"], env
 	throw new Error(`${operation} requires either ref or both x and y.`);
 }
 
-function focusedTarget(env: ActionEnvironment): ActionTarget {
-	if (!env.image) throw new Error("Focused keyboard input requires an image-bearing state.");
-	return { focus: { x: Math.floor(env.image.width / 2), y: Math.floor(env.image.height / 2) } };
+function focusedTarget(_env: ActionEnvironment): ActionTarget {
+	// The point is a transport sentinel only: platform backends unwrap `focus`
+	// and set preserveFocus, while keyboard delivery ignores its coordinates.
+	// Requiring a screenshot here added seconds to semantic focus chains.
+	return { focus: { x: 0, y: 0 } };
 }
 
 function containsEditable(node: OutlineNode): boolean {
@@ -95,7 +92,8 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
 	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));
-	const needsForeground = !env.headless && (operation === "click" || operation === "press") && "x" in target;
+	const targetsEditableRef = Boolean(action.ref) && env.node(action.ref!).isTextInput;
+	const needsForeground = !env.headless && (operation === "click" || operation === "press") && ("x" in target || targetsEditableRef);
 
 	switch (operation) {
 		case "press":

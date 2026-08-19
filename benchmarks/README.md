@@ -13,6 +13,11 @@ or fail. Pointer and focus telemetry describes total physical-user activity
 during the episode; use SCUA's foreground-escalation fields to attribute a
 focus takeover to the executor.
 
+Successful claims are also checked against the complete mutation history. An
+unknown mutation, a failed mutation followed only by an already-present value,
+or a cancelled/partially failed plan cannot be reported as a consistent
+success claim.
+
 ## Twenty-task macOS pilot
 
 The versioned pilot contains eight Calculator tasks, four TextEdit tasks, four

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ActionPlanNode, ExecutePlanParams } from "./contract.ts";
 
-export type PlanNodeStatus = "pending" | "running" | "succeeded" | "failed" | "blocked";
+export type PlanNodeStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | "blocked";
 
 export interface PlanErrorClassification {
 	code: string;
@@ -41,7 +41,7 @@ export interface PlanNodeTrace<T> {
 
 export interface ActionPlanTrace<T> {
 	planId: string;
-	status: "succeeded" | "partially_failed" | "failed";
+	status: "succeeded" | "partially_failed" | "failed" | "cancelled";
 	startedAt: number;
 	completedAt: number;
 	durationMs: number;
@@ -191,6 +191,11 @@ export async function executeAdaptiveActionPlan<T>(
 					const completedAt = Date.now();
 					const attemptTrace: PlanAttemptTrace = { attempt, stateId, startedAt: attemptStartedAt, completedAt, durationMs: completedAt - attemptStartedAt, status: "failed", error: classified };
 					trace.attempts.push(attemptTrace);
+					if (signal?.aborted || classified.code === "cancelled") {
+						trace.status = "cancelled";
+						trace.error = classified;
+						return;
+					}
 					if (!canRefresh(node, classified, attempt, retryStartedAt)) {
 						trace.status = "failed";
 						trace.error = classified;
@@ -215,6 +220,17 @@ export async function executeAdaptiveActionPlan<T>(
 	};
 
 	while ([...traces.values()].some((trace) => trace.status === "pending" || trace.status === "running")) {
+		if (signal?.aborted) {
+			const now = Date.now();
+			for (const trace of traces.values()) {
+				if (trace.status !== "pending") continue;
+				trace.status = "cancelled";
+				trace.completedAt = now;
+				trace.error = { code: "cancelled", message: "Action plan was aborted before this node started.", retryable: true, delivery: "definitely_not_delivered", recovery: "abort" };
+			}
+			await Promise.all(running.values());
+			break;
+		}
 		let progressed = false;
 		for (const node of validated.nodes) {
 			if (running.size >= validated.maxConcurrency) break;
@@ -243,7 +259,7 @@ export async function executeAdaptiveActionPlan<T>(
 	const succeeded = nodeTraces.filter((node) => node.status === "succeeded").length;
 	return {
 		planId: validated.planId,
-		status: succeeded === nodeTraces.length ? "succeeded" : succeeded === 0 ? "failed" : "partially_failed",
+		status: signal?.aborted || nodeTraces.some((node) => node.status === "cancelled") ? "cancelled" : succeeded === nodeTraces.length ? "succeeded" : succeeded === 0 ? "failed" : "partially_failed",
 		startedAt,
 		completedAt,
 		durationMs: completedAt - startedAt,

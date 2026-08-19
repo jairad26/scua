@@ -2230,10 +2230,11 @@ final class Bridge {
 			beforeValue = stringAttribute(stored, attribute: kAXValueAttribute as CFString)
 			beforeSelected = stringAttribute(stored, attribute: kAXSelectedTextAttribute as CFString)
 		} else if let xNumber = target["x"] as? NSNumber, let yNumber = target["y"] as? NSNumber {
-			guard record.hasImage else {
+			let preservesExistingFocus = (params["preserveFocus"] as? Bool ?? false) && (action == "typeText" || action == "keypress")
+			guard record.hasImage || preservesExistingFocus else {
 				throw BridgeFailure(message: "Coordinate targeting is unavailable for this outline-only root", code: "coordinate_unavailable_for_root")
 			}
-			rawPoint = lookPoint(record: record, x: xNumber.doubleValue, y: yNumber.doubleValue)
+			rawPoint = preservesExistingFocus ? .zero : lookPoint(record: record, x: xNumber.doubleValue, y: yNumber.doubleValue)
 			beforeValue = nil
 			beforeSelected = nil
 		} else {
@@ -2410,6 +2411,11 @@ final class Bridge {
 			let text = params["text"] as? String ?? ""
 			if let cursorPoint = try? coordinatePoint() { animateCursor(at: cursorPoint) }
 			let insideWebArea = hasAncestorRole(element, role: "AXWebArea")
+			let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+			if focused == .success {
+				performed["focused"] = true
+				usleep(20_000)
+			}
 			// A semantic AXValue write is the lowest-common-denominator delivery for
 			// editable controls, including browser content. Chromium frequently accepts
 			// this background-safe write; the older web-only keyboard branch skipped it
@@ -2497,11 +2503,23 @@ final class Bridge {
 			guard let keys = params["keys"] as? [String], !keys.isEmpty else {
 				throw BridgeFailure(message: "keypress requires keys", code: "invalid_args")
 			}
+			let normalizedKeys = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+			if delivery == "pid",
+				let element,
+				normalizedKeys.count == 1,
+				["enter", "return"].contains(normalizedKeys[0]),
+				supportsAction(element, action: kAXConfirmAction as CFString)
+			{
+				// AXConfirm is not interchangeable with a Return key. Finder is one
+				// concrete example: it can update the exposed AXValue without committing
+				// the filename. Fail before dispatch so the coordinator can safely take
+				// the foreground attention lease and deliver the real key event.
+				throw BridgeFailure(message: "This control requires a foreground Return key to commit its value", code: "foreground_required")
+			}
 			if let element {
 				if let cursorPoint = try? coordinatePoint() { animateCursor(at: cursorPoint) }
 				let focused = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 				if focused == .success { performed["focused"] = true }
-				let normalizedKeys = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
 				if normalizedKeys.count == 2,
 					normalizedKeys.last == "a",
 					["cmd", "command", "meta"].contains(normalizedKeys.first ?? ""),
@@ -2546,6 +2564,11 @@ final class Bridge {
 			if beforeValue != afterValue || beforeSelected != afterSelected || windowChanged {
 				outcome = "worked"
 			}
+		} else if action == "keypress" {
+			// A key event and a changed window are delivery evidence, not proof of
+			// the caller's semantic outcome. The coordinator's explicit postcondition
+			// or an external task evaluator must decide whether the key committed.
+			outcome = "unknown"
 		} else if windowChanged {
 			outcome = "worked"
 		}

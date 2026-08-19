@@ -66,14 +66,10 @@ const actionEnv = {
 };
 const preparedClick = prepareAction({ action: "click", ref: editor.ref }, { currentFocus: false }, actionEnv);
 assert.equal(preparedClick.establishesFocus, true, "editable semantic clicks should establish transaction focus");
-assert("x" in preparedClick.target, "text-input clicks should use their observed center to establish deterministic focus");
+assert("ref" in preparedClick.target, "text-input clicks should retain semantic grounding so native AX geometry avoids screenshot hydration");
 assert.equal(preparedClick.needsForeground, true, "text-input clicks should establish focus through foreground pointer input");
 assert.equal(transactionNeedsVerifiedVisualDelivery([{ action: "click", ref: editor.ref }], nextLook, false), true, "prepared coordinate click bypassed the visual postcondition guard");
-assert.throws(
-	() => transactionNeedsVerifiedVisualDelivery([{ action: "click", ref: editor.ref }], { ...nextLook, image: undefined }, false),
-	/image-bearing/,
-	"coordinate fallback did not request lazy image hydration",
-);
+assert.equal(transactionNeedsVerifiedVisualDelivery([{ action: "click", ref: editor.ref }], { ...nextLook, image: undefined }, false), true, "semantic text-input click incorrectly required screenshot hydration");
 const pictureTarget = { ...editor, ref: "@e-picture", wireRef: undefined, isTextInput: false, pictureOnly: true };
 const pictureClick = prepareAction({ action: "click", ref: pictureTarget.ref }, { currentFocus: false }, { ...actionEnv, node: () => pictureTarget });
 assert.equal(pictureClick.needsForeground, true, "picture-only clicks should use foreground pointer delivery");
@@ -198,6 +194,14 @@ await Promise.all([
 	peerScheduler.writeWithClaims("desktop-window:7:b", 0, ["desktop-app:7"], async () => await work()),
 ]);
 assert.equal(peak, 1, "different windows in one app bypassed the application-scoped mutation claim");
+
+active = 0;
+peak = 0;
+await Promise.all([
+	scheduler.read("desktop-window:7:a", async () => await work()),
+	peerScheduler.read("desktop-window:7:b", async () => await work()),
+]);
+assert.equal(peak, 2, "window-local reads in one application were unnecessarily serialized");
 
 active = 0;
 peak = 0;

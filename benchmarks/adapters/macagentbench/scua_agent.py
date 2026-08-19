@@ -5,6 +5,12 @@ import shlex
 import uuid
 
 
+CORE_SCUA_TOOLS = [
+    "open_root", "find_roots", "observe_ui", "search_ui", "expand_ui",
+    "inspect_ui", "act_ui", "execute_plan", "wait_for",
+]
+
+
 class ScuaAgent:
     def __init__(
         self,
@@ -29,6 +35,8 @@ class ScuaAgent:
                 "You are the planning layer in a controlled computer-use benchmark.",
                 "Complete the task using only tools from the SCUA MCP server.",
                 "Do not use shell, filesystem, AppleScript, direct APIs, or any non-SCUA tool during the task.",
+                "Batch independent selectors in one search_ui call and prefer one checked act_ui or execute_plan transaction.",
+                "A failed mutation cannot become success through a later read-only observation.",
                 "Verify the requested end state before finishing.",
                 f"Task: {instruction}",
                 'Final line: SCUA_BENCHMARK_RESULT {"status":"success"|"failure","summary":"brief evidence"}',
@@ -57,6 +65,12 @@ class ScuaAgent:
             f"mcp_servers.scua.command={json.dumps(run_mcp)}",
             "-c",
             'mcp_servers.scua.default_tools_approval_mode="approve"',
+            "-c",
+            f"mcp_servers.scua.enabled_tools={json.dumps(CORE_SCUA_TOOLS)}",
+            "-c",
+            'model_reasoning_effort="low"',
+            "-c",
+            'model_verbosity="low"',
         ]
         if self.model and self.model != "scua":
             args.extend(["--model", self.model])

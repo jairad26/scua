@@ -11,6 +11,7 @@ surface; it is not a permanent allowlist.
 | Managed Chromium fixture | CDP button press, textbox replacement, checkbox press, immutable successor | Yes (`cdp`) | Newly verified semantic postcondition | 0.71–0.74 s/action with an intentional 0.70 s fixture delay |
 | Calculator | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
 | Finder Downloads | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.34 s including successor observation |
+| Finder rename | Semantic filename discovery, background commit rejection, one foreground attention lease, focused HID sequence, external filesystem evaluator | No reliable background commit; foreground attempted | Fail-closed: Finder's draft AX value and key-event window changes are not accepted as a committed rename; external evaluator currently fails | Direct executor probe remains unsupported; no success latency claimed |
 | Calendar | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
 | Notes | Harness available; semantic create/edit compatibility must be rerun after each macOS/helper change | Not claimed by this baseline | Not claimed by this baseline | Pending |
 | Spotify native app | Electron search textbox replacement through generic AX plus PID-targeted keyboard events | Yes (`pid`), without focus transfer | AX value plus resulting search content (`Raga of Madness`) | 2.2 s including fresh observations and result wait; action reported `worked` |
@@ -39,6 +40,7 @@ the full tree.
 ```sh
 npm run test:logical-actors-live
 npm run test:multi-agent-live
+node scripts/soak-control-plane.mjs --duration-ms 5000
 ```
 
 The first command tests shared-process logical actors, checked browser actions,
@@ -52,3 +54,8 @@ traversal, capture, encoding, OCR, and total time. Action execution evidence
 separately reports delivery, verification, and successor-observation latency.
 This keeps percentile collection mechanical without turning SQLite or a local
 embedding model into the source of live element identity.
+
+`npm run test:finder-rename-live` is an explicitly mutating, foreground-capable
+external-evaluator probe. It currently fails by design at the filesystem check;
+that failure documents an unsupported commit boundary and prevents the former
+false-positive result from becoming compatibility evidence.

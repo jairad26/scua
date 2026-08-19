@@ -249,6 +249,14 @@ interface OutlineToolDetails {
 	returned?: number;
 	hasMore?: boolean;
 	matches?: SerializedOutlineSearchMatch[];
+	queryResults?: Array<{
+		id?: string;
+		query: { text?: string; role?: string; capability?: string };
+		matches: SerializedOutlineSearchMatch[];
+		totalMatches: number;
+		returned: number;
+		hasMore: boolean;
+	}>;
 	target?: SerializedOutlineNode;
 	note?: WindowNote;
 	semanticIndex?: { complete: boolean; indexedNodes: number; pendingFrontiers: number; revision: number; staleFrontiers: number; error?: string };
@@ -1556,6 +1564,7 @@ async function helperAct(
 	action: NativePreparedAction,
 	headless: boolean,
 	signal?: AbortSignal,
+	foregroundReady = false,
 ): Promise<ExecutionTrace> {
 	const executionMode = currentExecutionMode();
 	const allowForegroundFallback = !headless;
@@ -1569,6 +1578,12 @@ async function helperAct(
 	const textTimeout = "text" in action.params ? action.params.text.length * 25 + 4_000 : COMMAND_TIMEOUT_MS;
 	const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, textTimeout);
 	const deliver = async (policy: DeliveryPolicy): Promise<HelperActResult> => checked(await currentPlatformBackend.act(helperActRequest(target, action, policy), { signal, timeoutMs }));
+	if (foregroundReady) {
+		const foreground = await deliver("foreground");
+		const trace = executionTraceFromAct(foreground, "foreground", true);
+		trace.backgroundFirst = false;
+		return trace;
+	}
 	const foregroundTrace = async (backgroundFirst: boolean, reason?: string, backgroundAttempt?: ExecutionTrace["backgroundAttempt"]): Promise<ExecutionTrace> => {
 		return await withForegroundAttention(target, async () => {
 			const foreground = await deliver("foreground");
@@ -1586,34 +1601,11 @@ async function helperAct(
 		return await foregroundTrace(false);
 	}
 	if (executionMode === "foreground" && !headless) {
-		return await withForegroundAttention(target, async () => {
-			let result: HelperActResult;
-			try {
-				result = await deliver("background");
-			} catch (error) {
-				const code = (error as Error & { code?: string })?.code;
-				if (code !== "foreground_required") throw error;
-				const foreground = await deliver("foreground");
-				const trace = executionTraceFromAct(foreground, "foreground", true);
-				trace.backgroundFirst = true;
-				trace.escalatedToForeground = true;
-				trace.escalationReason = code;
-				trace.backgroundAttempt = { outcome: "foreground_required", reason: error instanceof Error ? error.message : String(error) };
-				return trace;
-			}
-			if (canRetryInForeground(action, result.outcome, headless)) {
-				const foreground = await deliver("foreground");
-				const trace = executionTraceFromAct(foreground, "foreground", true);
-				trace.backgroundFirst = true;
-				trace.escalatedToForeground = true;
-				trace.escalationReason = "side_effect_free_didnt";
-				trace.backgroundAttempt = { outcome: "didnt", reason: "Visible semantic delivery produced no observable value change; a physical retry was safe." };
-				return trace;
-			}
-			const trace = executionTraceFromAct(result, "background", true);
-			trace.backgroundFirst = true;
-			return trace;
-		}, signal);
+		// Foreground mode is an explicit delivery guarantee, not merely a request
+		// to activate the app before trying the same process-targeted event. The
+		// helper still prefers AX semantics under this policy, but keyboard/pointer
+		// fallbacks use HID while the attention lease is held.
+		return await foregroundTrace(false);
 	}
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
@@ -2214,27 +2206,25 @@ function shouldEscalateSearchOCR(matches: OutlineSearchMatch[], _text?: string):
 async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Promise<AgentToolResult<OutlineToolDetails>> {
 	const state = operationState();
 	let outline = currentOutlineOrThrow(params.stateId);
-	const text = trimOrUndefined(params.text);
-	const role = trimOrUndefined(params.role);
-	const capability = trimOrUndefined(params.capability);
-	if (!text && !role && !capability) throw new Error("search_ui requires text, role, or capability. Use observe_ui for a bounded overview.");
+	const queries = (params.queries?.length ? params.queries : [{ id: params.id, text: params.text, role: params.role, capability: params.capability }])
+		.map((query) => ({ id: trimOrUndefined(query.id), text: trimOrUndefined(query.text), role: trimOrUndefined(query.role), capability: trimOrUndefined(query.capability) }));
+	if (queries.length > 16) throw new Error("search_ui accepts at most 16 cached queries per call.");
+	if (queries.some((query) => !query.text && !query.role && !query.capability)) throw new Error("Every search_ui query requires text, role, or capability. Use observe_ui for a bounded overview.");
 	const limit = 12;
-	let ranked = searchOutlineRanked(outline, text, role, capability, limit);
-	let matches = ranked.matches;
+	let ranked = queries.map((query) => searchOutlineRanked(outline, query.text, query.role, query.capability, limit));
 	let escalatedOCR = false;
 	const semanticIndex = semanticIndexForOperation(state);
-	if (!hasDefinitiveSearchMatch(outline, text, role, capability) && semanticIndex && !semanticIndex.complete && !semanticIndex.error) {
-		await waitForSemanticIndex(semanticIndex, (candidate) => hasDefinitiveSearchMatch(candidate, text, role, capability), signal);
+	if (queries.some((query) => !hasDefinitiveSearchMatch(outline, query.text, query.role, query.capability)) && semanticIndex && !semanticIndex.complete && !semanticIndex.error) {
+		await waitForSemanticIndex(semanticIndex, (candidate) => queries.every((query) => hasDefinitiveSearchMatch(candidate, query.text, query.role, query.capability)), signal);
 	}
 	if (semanticIndex && semanticIndex.outline.nodes.length > outline.nodes.length) {
 		outline = adoptSemanticIndex(state, semanticIndex);
-		ranked = searchOutlineRanked(outline, text, role, capability, limit);
-		matches = ranked.matches;
+		ranked = queries.map((query) => searchOutlineRanked(outline, query.text, query.role, query.capability, limit));
 	}
 	const look = state.currentLook;
 	// Browser roots own a CDP snapshot, not a desktop window. Never leak an
 	// empty/static browser search into desktop capture or OCR.
-	if (searchMayEscalateToDesktopOcr(state.contextId) && shouldEscalateSearchOCR(matches, text) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
+	if (searchMayEscalateToDesktopOcr(state.contextId) && ranked.some((result, index) => shouldEscalateSearchOCR(result.matches, queries[index].text)) && look && look.readText?.requested !== "never" && !look.readText?.executed && state.lastSearchOcrEscalatedLookId !== look.lookId) {
 		state.lastSearchOcrEscalatedLookId = look.lookId;
 		const currentTarget = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 		// captureCurrentTarget adopts the new look/outline/capture into
@@ -2244,21 +2234,32 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 		if (!state.resourceKey || state.epoch === undefined) throw new Error("The observation has no live resource identity. Observe again.");
 		const captureResult = (await resourceScheduler.readAt(state.resourceKey, state.epoch, async () => await captureCurrentTarget(signal, "always", AUTO_IMAGE_MAX_DIMENSION, currentTarget, true))).value;
 		outline = captureResult.outline;
-		ranked = searchOutlineRanked(outline, text, role, capability, limit);
-		matches = ranked.matches;
+		ranked = queries.map((query) => searchOutlineRanked(outline, query.text, query.role, query.capability, limit));
 		escalatedOCR = true;
 	}
-	const detailMatches = matches.map(serializeOutlineSearchMatch);
-	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, matches: detailMatches, totalMatches: ranked.totalMatches, returned: matches.length, hasMore: ranked.totalMatches > matches.length, note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
-	const lines = matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]\n  path: ${match.path}`);
+	const queryResults = ranked.map((result, index) => ({
+		...(queries[index].id ? { id: queries[index].id } : {}),
+		query: { ...(queries[index].text ? { text: queries[index].text } : {}), ...(queries[index].role ? { role: queries[index].role } : {}), ...(queries[index].capability ? { capability: queries[index].capability } : {}) },
+		matches: result.matches.map(serializeOutlineSearchMatch),
+		totalMatches: result.totalMatches,
+		returned: result.matches.length,
+		hasMore: result.totalMatches > result.matches.length,
+	}));
+	const single = queryResults.length === 1 ? queryResults[0] : undefined;
+	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, ...(single ? { matches: single.matches, totalMatches: single.totalMatches, returned: single.returned, hasMore: single.hasMore } : { queryResults }), note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
+	const lines = queryResults.flatMap((result, index) => [
+		`query ${result.id ?? index + 1} ${JSON.stringify(result.query)}: ${result.totalMatches} match${result.totalMatches === 1 ? "" : "es"}; returned ${result.returned}`,
+		...result.matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]\n  path: ${match.path}`),
+	]);
 	const noteHeader = renderNote(state.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";
 	const escalationText = escalatedOCR ? " OCR text was escalated for this search after the cached outline had no matches." : "";
 	const indexingText = semanticIndex && !semanticIndex.complete
 		? ` Semantic indexing continues in the background (${semanticIndex.outline.nodes.length} nodes indexed, ${semanticFrontiers(semanticIndex.outline).length} frontiers pending).`
 		: semanticIndex?.complete ? ` Semantic index complete at ${semanticIndex.outline.nodes.length} nodes.` : "";
-	const moreText = ranked.totalMatches > matches.length ? ` Refine the query to inspect ${ranked.totalMatches - matches.length} additional matches.` : "";
-	return { content: [{ type: "text", text: `${noteText}Found ${ranked.totalMatches} outline match${ranked.totalMatches === 1 ? "" : "es"}; returned ${matches.length}.${moreText}${escalationText}${indexingText}\n${lines.join("\n")}` }], details };
+	const totalMatches = queryResults.reduce((sum, result) => sum + result.totalMatches, 0);
+	const totalReturned = queryResults.reduce((sum, result) => sum + result.returned, 0);
+	return { content: [{ type: "text", text: `${noteText}Ran ${queryResults.length} cached outline quer${queryResults.length === 1 ? "y" : "ies"}; found ${totalMatches} matches and returned ${totalReturned}.${escalationText}${indexingText}\n${lines.join("\n")}` }], details };
 }
 
 /** Reads cached outline; truncated refs trigger a scoped look. */
@@ -2349,7 +2350,8 @@ export function transactionNeedsVerifiedVisualDelivery(actions: UiAction[], look
 	for (const action of actions) {
 		const prepared = prepareUiAction(action, actionState, look, headless);
 		if (prepared.establishesFocus) actionState.currentFocus = true;
-		if ((prepared.action === "click" || prepared.action === "press" || prepared.action === "drag") && !("ref" in prepared.target)) return true;
+		if ((prepared.action === "click" || prepared.action === "press") && prepared.needsForeground) return true;
+		if (prepared.action === "drag" && !("ref" in prepared.target)) return true;
 	}
 	return false;
 }
@@ -2384,6 +2386,27 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		execution.rootDelta = batchTrace.rootDelta;
 		execution.stoppedAt = result.stoppedAt;
 		return execution;
+	}
+	// A click followed by unscoped typing/keys is one focus-sensitive gesture,
+	// not a set of independent foreground actions. Hold the attention lease and
+	// focus the target window once for the whole chain; re-focusing between keys
+	// can collapse transient editors (for example, a native rename field).
+	const plannedState: ActionState = { currentFocus: false };
+	const planned = actions.map((action) => {
+		const prepared = prepareUiAction(action, plannedState, look, false);
+		if (prepared.establishesFocus) plannedState.currentFocus = true;
+		return prepared;
+	});
+	if (!headless && planned.some((action) => action.usesCurrentFocus)) {
+		return await withForegroundAttention(target, async () => {
+			const steps: ExecutionTrace[] = [];
+			for (const prepared of planned) {
+				const step = await helperAct(target, prepared as NativePreparedAction, false, signal, true);
+				steps.push(step);
+				if (step.outcome === "didnt") break;
+			}
+			return aggregateExecutions(steps);
+		}, signal);
 	}
 	const steps: ExecutionTrace[] = [];
 	const actionState: ActionState = { currentFocus: false };
@@ -2589,8 +2612,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 				await sleep(settleMsForExecution(execution), signal);
 			}
 			const successorStartedAt = Date.now();
-			const editedRefs = executedActions.every((action) => action.action === "setText" && action.ref)
-				? executedActions.map((action) => action.ref!)
+			const editedRefs = executedActions.some((action) => action.action === "setText" && action.ref)
+				&& executedActions.every((action) => (action.action === "setText" || action.action === "keypress") && action.ref)
+				? [...new Set(executedActions.map((action) => action.ref!))]
 				: undefined;
 			const capture = executedActions.every((action) => action.action === "moveMouse")
 				? captureUnchangedCurrentTarget(target)

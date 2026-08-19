@@ -46,13 +46,14 @@ The concrete engine work in this roadmap is now implemented:
   while failure blocks only dependent nodes and leaves unrelated work running.
 
 Automated coverage includes 50 logical actors making concurrent progress in
-one coordinator process, same-app claim serialization, cross-app overlap,
-typed stale/ownership errors, CDP false-delivery and page-exception handling,
-actor state isolation, and handoff fencing. Live evidence currently covers a
-three-actor one-process browser run and a three-process native isolation run;
-see [compatibility.md](compatibility.md). The remaining release gate is an
-operational one-hour 50-actor soak and broader real-app rows, not an unbuilt API
-or control-plane mechanism.
+one coordinator process, same-app mutation serialization with window-local
+read overlap, cross-app overlap, explicit plan cancellation, actor-close
+cancellation, typed stale/ownership errors, CDP false-delivery and
+page-exception handling, actor state isolation, and handoff fencing. A
+configurable one-hour soak harness now measures progress, retained events,
+heap, and file descriptors; the five-second smoke completed 4,550 operations
+with peak concurrency 50 and no observed heap or descriptor growth. The full
+one-hour run and broader real-app rows remain operational release gates.
 
 ## Current evidence
 
@@ -69,9 +70,26 @@ The live three-agent fixture has established a useful baseline:
   by tests.
 
 This proves useful concurrency across different processes and a fail-closed
-same-resource race. It does not yet prove safe concurrency between two windows
-of the same application, sustained high actor counts, explicit ownership
-handoff, or broad background compatibility across opaque applications.
+same-resource race. Unit/integration evidence also covers same-application
+claim scope, 50 logical actors, cancellation, and explicit handoff. Live
+same-app multi-window behavior, a one-hour sustained run, and broad background
+compatibility across opaque applications still need operational evidence.
+
+## Open empirical issues — 2026-08-19
+
+- Finder can accept a filename `AXValue` and expose the requested name without
+  committing it to the filesystem. SCUA no longer treats a key event plus a
+  window change as semantic success, and benchmark success claims now fail
+  closed on unknown or unresolved mutations. The generic foreground rename
+  composition is retained as a gated external-evaluator probe, but Finder
+  commit remains unsupported rather than falsely reported as complete.
+- Finder focus-chain profiling removed unnecessary screenshot hydration and
+  now holds one attention lease without refocusing between dependent keys.
+  The remaining direct probe is executor/application behavior, not planner
+  overhead.
+- The MacAgentBench adapter is implemented, but this machine does not have a
+  MacAgentBench checkout or provisioned macOS benchmark VM. No established
+  benchmark score is claimed until that external environment exists.
 
 ## Immediate correctness work
 
@@ -248,13 +266,12 @@ actor-aware quotas, explicit expiry, and a global memory bound. A handoff must
 never transfer a raw state reference implicitly; the recipient acquires the
 resource and observes a fresh state.
 
-### P2: durable events, cancellation, budgets, and traces
+### P2: durable events, cancellation, budgets, and traces — partially complete
 
-Expose change events and operation lifecycle records so an orchestrator can
-wait without polling, cancel work promptly, assign action/time budgets, and
-reconstruct which actor observed or mutated each resource. Cancellation must
-report whether an action was definitely not delivered, may have been delivered,
-or completed before cancellation.
+Operation lifecycle records, prompt cancellation, action/time budgets, bounded
+traces, standard MCP request cancellation, actor-close cancellation, and
+per-node delivery certainty are implemented. A durable external change-event
+subscription that lets an orchestrator wait without polling remains open.
 
 Garbage-collect coordinator epoch/lease metadata. Lease ownership must include
 a process-start identity or equivalent fencing token so PID reuse cannot make a
@@ -278,6 +295,10 @@ logical actors while satisfying all of the following:
    application remain unchanged in background mode.
 7. Memory, file descriptors, browser targets, helper look records, and
    coordinator metadata remain within explicit bounds during a one-hour soak.
+
+Run the operational gate with `npm run soak:control-plane`. Use
+`node scripts/soak-control-plane.mjs --duration-ms 5000` only as a smoke check;
+it is not a substitute for the one-hour acceptance run.
 8. The complete actor/resource/action trace can be reconstructed without
    scraping human-readable text.
 9. The same public contract controls Accessibility and CDP roots without

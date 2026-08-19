@@ -75,6 +75,13 @@ const conditionProperties: Record<string, JsonSchema> = {
 	timeoutMs: number("Maximum wait in milliseconds.", { minimum: 100, maximum: 60_000, default: 10_000 }),
 };
 
+const searchQueryProperties: Record<string, JsonSchema> = {
+	id: string("Optional caller label echoed with this query's result."),
+	text: string("Human-readable text or label."),
+	role: string("Exact normalized role, such as button."),
+	capability: string("Exact capability, such as press or setValue."),
+};
+
 const condition = object(conditionProperties);
 const planNodeProperties: Record<string, JsonSchema> = {
 	id: string("Stable node ID within this plan."),
@@ -162,13 +169,13 @@ export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"search_ui",
 		"Search cached UI",
-		"Search the complete cached outline without rescanning the live application. At least one predicate is required.",
-		object({
-			stateId,
-			text: string("Human-readable text or label."),
-			role: string("Exact normalized role, such as button."),
-			capability: string("Exact capability, such as press or setValue."),
-		}, ["stateId"]),
+		"Search the complete cached outline without rescanning the live application. Batch independent selectors in queries to avoid model round trips.",
+		{
+			oneOf: [
+				object({ stateId, ...searchQueryProperties }, ["stateId"]),
+				object({ stateId, queries: { type: "array", items: object(searchQueryProperties), minItems: 1, maxItems: 16 } }, ["stateId", "queries"]),
+			],
+		},
 		true,
 	),
 	tool(

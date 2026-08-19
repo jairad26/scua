@@ -23,6 +23,8 @@ export function summarizeCodexEvents(events, timings = new Map()) {
 	let peakConcurrency = 0;
 	let staleErrors = 0;
 	let foregroundEscalations = 0;
+	let lastMutation;
+	const mutations = [];
 
 	for (const event of events) {
 		if (event.type === "turn.completed") usage = event.usage ?? {};
@@ -34,6 +36,19 @@ export function summarizeCodexEvents(events, timings = new Map()) {
 			tools.push(tool);
 			if (item.server !== "scua") unauthorizedTools.push(`${item.server ?? "unknown"}:${item.tool ?? "unknown"}`);
 			const result = structuredResult(item);
+			if (item.server === "scua" && ["act_ui", "execute_plan"].includes(item.tool)) {
+				const planOutcome = item.tool === "execute_plan"
+					? result?.status === "succeeded" ? "worked" : result?.status === "failed" ? "didnt" : "unknown"
+					: undefined;
+				lastMutation = {
+					tool: item.tool,
+					outcome: result?.execution?.outcome ?? planOutcome,
+					verification: result?.execution?.verification?.status,
+					status: result?.status,
+					errorCode: result?.execution?.error?.code ?? result?.error?.code,
+				};
+				mutations.push(lastMutation);
+			}
 			let foundStaleError = false;
 			walk(result, (record) => {
 				const outcome = record?.execution?.outcome;
@@ -56,6 +71,28 @@ export function summarizeCodexEvents(events, timings = new Map()) {
 	const claim = /SCUA_BENCHMARK_RESULT\s+(\{[^\n]+\})/.exec(finalMessage);
 	let agentClaim;
 	try { agentClaim = claim ? JSON.parse(claim[1]) : undefined; } catch { agentClaim = undefined; }
+	let unresolvedMutationFailure = false;
+	for (const mutation of mutations) {
+		const failed = mutation.outcome === "didnt"
+			|| mutation.verification === "failed"
+			|| Boolean(mutation.errorCode)
+			|| ["failed", "partially_failed", "cancelled"].includes(mutation.status);
+		const conclusivelySucceeded = mutation.outcome === "worked"
+			&& mutation.verification !== "failed"
+			&& mutation.verification !== "preexisting"
+			&& !mutation.errorCode
+			&& !["failed", "partially_failed", "cancelled"].includes(mutation.status);
+		if (failed) unresolvedMutationFailure = true;
+		else if (conclusivelySucceeded) unresolvedMutationFailure = false;
+	}
+	const finalMutationConclusive = !lastMutation || (
+		lastMutation.outcome === "worked"
+		&& lastMutation.verification !== "failed"
+		&& lastMutation.verification !== "preexisting"
+		&& !lastMutation.errorCode
+		&& !["failed", "partially_failed", "cancelled"].includes(lastMutation.status)
+	);
+	const claimConsistent = agentClaim?.status !== "success" || (!unresolvedMutationFailure && finalMutationConclusive);
 	return {
 		integrityPassed: unauthorizedTools.length === 0,
 		unauthorizedTools,
@@ -71,12 +108,16 @@ export function summarizeCodexEvents(events, timings = new Map()) {
 		usage,
 		finalMessage,
 		agentClaim,
+		lastMutation,
+		mutations,
+		claimConsistent,
 	};
 }
 
 export function aggregateEpisodes(episodes) {
 	const completed = episodes.filter((episode) => episode.evaluation?.passed).length;
 	const integrityPassed = episodes.filter((episode) => episode.agent?.metrics?.integrityPassed).length;
+	const claimConsistent = episodes.filter((episode) => episode.agent?.metrics?.claimConsistent !== false).length;
 	const qualifiedPassed = episodes.filter((episode) => episode.evaluation?.passed && episode.agent?.metrics?.integrityPassed).length;
 	const durationMs = episodes.reduce((sum, episode) => sum + (episode.durationMs ?? 0), 0);
 	const scuaToolCalls = episodes.reduce((sum, episode) => sum + (episode.agent?.metrics?.scuaToolCalls ?? 0), 0);
@@ -95,6 +136,8 @@ export function aggregateEpisodes(episodes) {
 		qualifiedSuccessRate: episodes.length ? qualifiedPassed / episodes.length : 0,
 		integrityPassed,
 		integrityRate: episodes.length ? integrityPassed / episodes.length : 0,
+		claimConsistent,
+		claimConsistencyRate: episodes.length ? claimConsistent / episodes.length : 0,
 		durationMs,
 		meanDurationMs: episodes.length ? durationMs / episodes.length : 0,
 		scuaToolCalls,

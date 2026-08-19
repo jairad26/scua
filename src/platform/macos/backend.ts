@@ -135,6 +135,10 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 	},
 
 	async waitFor(args: PlatformWaitForRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformWaitForResponse> {
-		return await macosHelper.command("axWaitFor", { ...args }, options);
+		// The helper's semantic deadline only bounds its polling loop. A final AX
+		// traversal and socket response can legitimately finish just after that
+		// deadline, so the transport must not race the operation it is carrying.
+		const transportTimeoutMs = Math.max(options?.timeoutMs ?? 0, args.timeoutMs + 3_000);
+		return await macosHelper.command("axWaitFor", { ...args }, { ...options, timeoutMs: transportTimeoutMs });
 	},
 };

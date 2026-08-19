@@ -80,12 +80,19 @@ const observeTool = defineTool({
 const searchUiTool = defineTool({
 	name: "search_ui",
 	label: "Search UI",
-	description: "Return a bounded, deterministically ranked search of the cached outline. At least one predicate is required.",
-	promptSnippet: "Find targets not shown in the compact observe_ui output; refine broad searches instead of paging matches.",
+	description: "Return one or up to sixteen bounded, deterministically ranked searches of the cached outline.",
+	promptSnippet: "Batch independent target selectors in queries; refine broad searches instead of paging matches.",
 	parameters: Type.Object({
+		id: Type.Optional(Type.String({ description: "Optional caller label", maxLength: 128 })),
 		text: Type.Optional(Type.String({ description: "Human-readable text or label", maxLength: 256 })),
 		role: Type.Optional(Type.String({ description: "Exact normalized role, e.g. button", maxLength: 128 })),
 		capability: Type.Optional(Type.String({ description: "Exact capability, e.g. press", maxLength: 128 })),
+		queries: Type.Optional(Type.Array(Type.Object({
+			id: Type.Optional(Type.String({ maxLength: 128 })),
+			text: Type.Optional(Type.String({ maxLength: 256 })),
+			role: Type.Optional(Type.String({ maxLength: 128 })),
+			capability: Type.Optional(Type.String({ maxLength: 128 })),
+		}), { minItems: 1, maxItems: 16 })),
 		stateId,
 	}),
 	execute: executeSearchUi,

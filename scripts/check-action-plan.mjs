@@ -98,4 +98,36 @@ await assert.rejects(
 	"cyclic action plan was accepted",
 );
 
+const cancelledController = new AbortController();
+let cancelledStarted = 0;
+const cancelledPlanPromise = executeAdaptiveActionPlan({
+	planId: "fixture-cancelled",
+	maxConcurrency: 1,
+	nodes: [
+		{ id: "running", stateId: "running-state", guards: [{ text: "running" }], actions: [{ action: "press", ref: "@e1" }] },
+		{ id: "not-started", stateId: "pending-state", guards: [{ text: "pending" }], actions: [{ action: "press", ref: "@e2" }] },
+	],
+}, {
+	execute: async (_node, _stateId, _attempt, signal) => {
+		cancelledStarted += 1;
+		await new Promise((resolve, reject) => {
+			const timer = setTimeout(resolve, 1_000);
+			signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Action plan was aborted.")); }, { once: true });
+		});
+		return { stateId: "unexpected" };
+	},
+	refresh: async () => "unexpected",
+	successorStateId: (result) => result.stateId,
+	classify: (error) => cancelledController.signal.aborted
+		? { code: "cancelled", message: error.message ?? String(error), retryable: true, delivery: "may_have_been_delivered", recovery: "reobserve" }
+		: classify(error),
+}, cancelledController.signal);
+setTimeout(() => cancelledController.abort(), 20);
+const cancelledPlan = await cancelledPlanPromise;
+assert.equal(cancelledPlan.status, "cancelled", "aborted action plan did not return an explicit cancelled status");
+assert.equal(cancelledStarted, 1, "cancellation allowed a pending plan node to start");
+assert.equal(cancelledPlan.nodes.find((node) => node.id === "running")?.status, "cancelled", "in-flight plan node did not report cancellation");
+assert.equal(cancelledPlan.nodes.find((node) => node.id === "not-started")?.status, "cancelled", "pending plan node was not cancelled before delivery");
+assert.equal(cancelledPlan.nodes.find((node) => node.id === "not-started")?.error?.delivery, "definitely_not_delivered", "never-started cancellation lost delivery certainty");
+
 console.log(`Adaptive action-plan checks passed (fixture ${plan.durationMs}ms, peak concurrency ${plan.peakConcurrency}).`);

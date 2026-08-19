@@ -224,7 +224,7 @@ const context = {
 	},
 } as unknown as ExtensionContext;
 
-const inflight = new Map<string, AbortController>();
+const inflight = new Map<string, { controller: AbortController; actorId?: string }>();
 
 function requestKey(id: unknown): string {
 	return typeof id === "string" ? id : JSON.stringify(id);
@@ -260,18 +260,25 @@ async function callTool(id: unknown, params: Record<string, unknown>): Promise<v
 
 	const controller = new AbortController();
 	const key = requestKey(id);
-	inflight.set(key, controller);
+	inflight.set(key, { controller });
 	try {
 		await runAsActor(actorToken(params), async () => {
 			const args = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
 				? params.arguments as Record<string, unknown>
 				: {};
 			const actor = currentActor();
+			const request = inflight.get(key);
+			if (request) request.actorId = actor.actorId;
 			const operationId = scuaControlPlane.startOperation(actor, name);
 			try {
 				const result = isControlTool
 					? await executeControlTool(name, args)
 					: await executor!(`mcp_${key}`, args, controller.signal, undefined, context);
+				if (name === "actor_session" && args.action === "close") {
+					for (const [otherKey, other] of inflight) {
+						if (otherKey !== key && other.actorId === actor.actorId) other.controller.abort();
+					}
+				}
 				const resultDetails = result.details && typeof result.details === "object" ? result.details as Record<string, any> : undefined;
 				scuaControlPlane.finishOperation(actor, operationId, name, "completed", {
 					resourceKey: resultDetails?.resource?.key ?? resultDetails?.resourceKey,
@@ -322,7 +329,7 @@ async function handle(message: Record<string, unknown>): Promise<void> {
 			return;
 		case "notifications/cancelled": {
 			const requestId = params.requestId;
-			if (requestId !== undefined) inflight.get(requestKey(requestId))?.abort();
+			if (requestId !== undefined) inflight.get(requestKey(requestId))?.controller.abort();
 			return;
 		}
 		case "ping":
@@ -356,7 +363,7 @@ let closing = false;
 async function close(): Promise<void> {
 	if (closing) return;
 	closing = true;
-	for (const controller of inflight.values()) controller.abort();
+	for (const request of inflight.values()) request.controller.abort();
 	await shutdownComputerUseSession().catch(() => undefined);
 }
 

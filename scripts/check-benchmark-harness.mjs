@@ -31,13 +31,46 @@ assert.equal(metrics.outcomes.worked, 1);
 assert.equal(metrics.verification.verified, 1);
 assert.equal(metrics.staleErrors, 1);
 assert.equal(metrics.agentClaim.status, "success");
+assert.equal(metrics.claimConsistent, true);
 assert.match(benchmarkPrompt("rename the file"), /only tools from the SCUA MCP server/);
+
+const inconsistent = summarizeCodexEvents([
+	{ type: "item.completed", item: { id: "failed", type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "didnt", verification: { status: "failed" } } } } } },
+	{ type: "item.completed", item: { id: "claim", type: "agent_message", text: 'SCUA_BENCHMARK_RESULT {"status":"success","summary":"looked right"}' } },
+]);
+assert.equal(inconsistent.claimConsistent, false, "a read-only follow-up could legitimize a failed final mutation");
+
+const preexistingAfterFailure = summarizeCodexEvents([
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "unknown", error: { code: "post_action_observation_failed" } } } } } },
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "worked", verification: { status: "preexisting" } } } } } },
+	{ type: "item.completed", item: { type: "agent_message", text: 'SCUA_BENCHMARK_RESULT {"status":"success"}' } },
+]);
+assert.equal(preexistingAfterFailure.claimConsistent, false, "a preexisting value incorrectly cleared an unresolved mutation failure");
+
+const verifiedRecovery = summarizeCodexEvents([
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "didnt" } } } } },
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "worked", verification: { status: "verified" } } } } } },
+	{ type: "item.completed", item: { type: "agent_message", text: 'SCUA_BENCHMARK_RESULT {"status":"success"}' } },
+]);
+assert.equal(verifiedRecovery.claimConsistent, true, "a later verified mutation did not clear a prior recoverable failure");
+
+const unknownClaim = summarizeCodexEvents([
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "act_ui", status: "completed", result: { structured_content: { execution: { outcome: "unknown" } } } } },
+	{ type: "item.completed", item: { type: "agent_message", text: 'SCUA_BENCHMARK_RESULT {"status":"success"}' } },
+]);
+assert.equal(unknownClaim.claimConsistent, false, "an unverified mutation was accepted as a successful task claim");
+
+const successfulPlanClaim = summarizeCodexEvents([
+	{ type: "item.completed", item: { type: "mcp_tool_call", server: "scua", tool: "execute_plan", status: "completed", result: { structured_content: { status: "succeeded", nodes: [{ status: "succeeded", outcome: "worked" }] } } } },
+	{ type: "item.completed", item: { type: "agent_message", text: 'SCUA_BENCHMARK_RESULT {"status":"success"}' } },
+]);
+assert.equal(successfulPlanClaim.claimConsistent, true, "a fully succeeded action plan was not accepted as conclusive mutation evidence");
 
 const summary = aggregateEpisodes([
 	{ durationMs: 100, evaluation: { passed: true }, activity: { focusChanges: 0, maximumCursorDistance: 0 }, agent: { metrics: { integrityPassed: true, scuaToolCalls: 2, foregroundEscalations: 0, staleErrors: 0, usage: { input_tokens: 10, output_tokens: 4 } } } },
 	{ durationMs: 300, evaluation: { passed: false }, activity: { focusChanges: 2, maximumCursorDistance: 12 }, agent: { metrics: { integrityPassed: false, scuaToolCalls: 4, foregroundEscalations: 1, staleErrors: 1, usage: { input_tokens: 20, output_tokens: 6 } } } },
 ]);
-assert.deepEqual(summary, { tasks: 2, passed: 1, successRate: 0.5, qualifiedPassed: 1, qualifiedSuccessRate: 0.5, integrityPassed: 1, integrityRate: 0.5, durationMs: 400, meanDurationMs: 200, scuaToolCalls: 6, meanScuaToolCalls: 3, inputTokens: 30, outputTokens: 10, focusChanges: 2, maximumCursorDistance: 12, physicalCursorMovedEpisodes: 1, foregroundEscalations: 1, staleErrors: 1 });
+assert.deepEqual(summary, { tasks: 2, passed: 1, successRate: 0.5, qualifiedPassed: 1, qualifiedSuccessRate: 0.5, integrityPassed: 1, integrityRate: 0.5, claimConsistent: 2, claimConsistencyRate: 1, durationMs: 400, meanDurationMs: 200, scuaToolCalls: 6, meanScuaToolCalls: 3, inputTokens: 30, outputTokens: 10, focusChanges: 2, maximumCursorDistance: 12, physicalCursorMovedEpisodes: 1, foregroundEscalations: 1, staleErrors: 1 });
 
 const adapter = await readFile(path.join(root, "benchmarks/adapters/macagentbench/scua_agent.py"), "utf8");
 assert.match(adapter, /class ScuaAgent/);

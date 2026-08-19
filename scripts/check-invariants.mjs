@@ -79,6 +79,12 @@ check("INV-4 static act owns input command surface", () => {
 	}
 });
 
+check("INV-4 foreground commit keys fail closed before background dispatch", () => {
+	assert(swift.includes('supportsAction(element, action: kAXConfirmAction as CFString)') && swift.includes('code: "foreground_required"'), "commit-capable Enter/Return can be sent through unverified process-targeted delivery");
+	assert(ts.includes("planned.some((action) => action.usesCurrentFocus)") && ts.includes("foregroundReady"), "focus-sensitive action chains do not hold one foreground attention lease");
+	assert(swift.includes('action == "keypress"') && swift.includes('outcome = "unknown"'), "keypress window changes can still masquerade as semantic success");
+});
+
 check("INV-8 deleted architecture-v1 identifiers absent", () => {
 	const deletedSrcIdentifiers = [
 		"SceneProjection", "SceneTarget", "SceneEdge", "SceneAssociation", "buildSceneProjection",
@@ -332,7 +338,7 @@ check("INV-18 consolidated actions and diff-first resulting views", () => {
 	assert(actions.includes("prepareAction") && actions.includes("canRetryInForeground"), "action preparation and safe recovery are not consolidated");
 	assert(!fs.existsSync(path.join(root, "src/interaction.ts")), "superseded interaction policy module still exists");
 	assert(!ts.includes("responseMode") && !extension.includes("responseMode"), "alternate confirmation-only action path still exists");
-	assert(ts.includes("currentFocus") && ts.includes('escalationReason = "side_effect_free_didnt"'), "runner does not preserve action focus or recover checked keyboard failures");
+	assert(ts.includes("currentFocus") && ts.includes('foregroundTrace(false)') && ts.includes('"side_effect_free_didnt"'), "runner does not preserve action focus, honor foreground mode, or recover checked keyboard failures");
 	assert(view.includes("stabilizeRefs") && view.includes("changesBetween"), "resulting-state ref stabilization or change rendering is missing");
 	assert(ts.includes('view: "full" | "diff"') && ts.includes("Changes ("), "agent result does not expose changes-first resulting views");
 	assert(extension.includes("const uiAction = Type.Union") && extension.includes("omit ref from typeText"), "agent action schema is not discriminated or focus-aware");
