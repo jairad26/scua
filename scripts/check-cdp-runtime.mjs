@@ -5,6 +5,7 @@ const originalWebSocket = globalThis.WebSocket;
 const commands = [];
 let connections = 0;
 let callFunctionThrows = false;
+let cursorEvaluateThrows = false;
 
 class FakeWebSocket {
 	static OPEN = 1;
@@ -25,8 +26,11 @@ class FakeWebSocket {
 		let result = {};
 		if (message.method === "Runtime.evaluate") {
 			const expression = String(message.params?.expression ?? "");
-			const value = expression.includes("elementFromPoint") ? false : expression.includes("__scuaMutationState") ? 0 : expression.includes("innerText") ? "Fixture text" : true;
-			result = { result: { value } };
+			if (cursorEvaluateThrows && expression.includes("scua-agent-cursor-")) result = { exceptionDetails: { text: "cursor fixture exception" } };
+			else {
+				const value = expression.includes("elementFromPoint") ? false : expression.includes("__scuaMutationState") ? 0 : expression.includes("innerText") ? "Fixture text" : true;
+				result = { result: { value } };
+			}
 		} else if (message.method === "Accessibility.getFullAXTree") {
 			result = { nodes: [{ nodeId: "root", role: { value: "document" }, name: { value: "Fixture" }, childIds: [] }] };
 		} else if (message.method === "DOM.resolveNode") {
@@ -51,7 +55,7 @@ globalThis.fetch = async () => ({
 process.env.PI_COMPUTER_USE_CDP_PORT = "9222";
 
 try {
-	const { cdpMutationGenerationForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
+	const { cdpMutationGenerationForContext, cdpPerformActionDetailedForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
 	const contextId = "browser:target-1";
 	const first = await cdpSnapshotForContext(contextId);
 	const second = await cdpSnapshotForContext(contextId);
@@ -65,6 +69,13 @@ try {
 
 	const delivered = await cdpPerformActionForContext(contextId, "fixture-agent", { action: "click", x: 9_999, y: 9_999 }, undefined);
 	assert.equal(delivered, false, "coordinate click with no element incorrectly reported delivery");
+
+	cursorEvaluateThrows = true;
+	const cursorFailure = await cdpPerformActionDetailedForContext(contextId, "fixture-agent", { action: "moveMouse", x: 20, y: 20 }, undefined);
+	assert.equal(cursorFailure?.worked, true, "visual cursor failure incorrectly blocked the browser action lane");
+	assert.equal(cursorFailure?.cursor.overlayPresented, false, "cursor injection failure was reported as visually acknowledged");
+	assert.match(cursorFailure?.cursor.overlayError ?? "", /cursor fixture exception/, "cursor injection error was not surfaced as evidence");
+	cursorEvaluateThrows = false;
 
 	callFunctionThrows = true;
 	await assert.rejects(

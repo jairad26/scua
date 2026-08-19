@@ -588,7 +588,7 @@ final class Bridge {
 		let bindStatus = withUnsafePointer(to: &address) { pointer in
 			pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
 		}
-		if bindStatus != 0 || listen(server, 8) != 0 { close(server); close(lockFile); exit(1) }
+		if bindStatus != 0 || listen(server, 128) != 0 { close(server); close(lockFile); exit(1) }
 		while true {
 			let client = accept(server, nil, nil)
 			if client < 0 { continue }
@@ -2103,9 +2103,16 @@ final class Bridge {
 		let beforeFocusedWindow = focusedWindowSummary(pid: pid)
 		let beforeValue: String?
 		let beforeSelected: String?
+		var cursorVisualEvidence: [String: Any]?
 		func finish(_ response: [String: Any]) -> [String: Any] {
-			if deferRootDelta { return response }
-			return attachRootDelta(to: response, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
+			var enriched = response
+			if let cursorVisualEvidence {
+				var evidence = enriched["evidence"] as? [String: Any] ?? [:]
+				for (key, value) in cursorVisualEvidence { evidence[key] = value }
+				enriched["evidence"] = evidence
+			}
+			if deferRootDelta { return enriched }
+			return attachRootDelta(to: enriched, before: beforeRootSnapshot, beforeFrontmostPid: beforeFrontmostPid, pid: pid, eventsLive: eventsLive, eventCursor: eventCursor, beforeCgSignature: beforeCgSignature)
 		}
 
 		if let ref = target["ref"] as? String {
@@ -2149,25 +2156,38 @@ final class Bridge {
 
 		if action == "moveMouse" {
 			let point = try coordinatePoint()
-			animateCursor(at: point)
+			let visualEvidence = animateCursor(at: point)
 			performed["grounding"] = element == nil ? "coordinates" : "description"
 			performed["delivery"] = "pid"
 			performed["verification"] = "visual_only"
-			return ["outcome": "unknown", "performed": performed]
+			return ["outcome": "unknown", "performed": performed, "evidence": visualEvidence]
 		}
 
-		func animateCursor(at point: CGPoint) {
-			guard supportsAgentCursor,
-				(request["cursorOverlay"] as? Bool ?? true),
-				delivery == "pid",
-				policy != "ax_only"
-			else { return }
+		@discardableResult
+		func animateCursor(at point: CGPoint) -> [String: Any] {
+			let startedAt = Date()
+			let requested = supportsAgentCursor
+				&& (request["cursorOverlay"] as? Bool ?? true)
+				&& delivery == "pid"
+				&& policy != "ax_only"
+			guard requested else {
+				let evidence: [String: Any] = [
+					"overlayRequested": false,
+					"overlayPresented": false,
+					"overlayRenderer": "native",
+					"overlayError": "disabled_for_delivery_policy",
+					"visualAckMs": elapsedMs(startedAt),
+				]
+				cursorVisualEvidence = evidence
+				return evidence
+			}
 			// Request handling runs on detached client threads while AppKit owns the
 			// main actor. A fire-and-forget hop let rapid parallel actions finish
 			// before their overlays were presented, so updates appeared in one late
 			// burst or not at all. A short acknowledgement bounds that queueing without
 			// involving the physical mouse, keyboard, or target application's focus.
 			let presented = DispatchSemaphore(value: 0)
+			let visible = Box<Bool>(false)
 			Task { @MainActor in
 				AgentCursor.animate(
 					agentId: agentId,
@@ -2175,9 +2195,20 @@ final class Bridge {
 					to: point,
 					above: record.windowId
 				)
+				visible.value = AgentCursor.isVisible(agentId: agentId)
 				presented.signal()
 			}
-			_ = presented.wait(timeout: .now() + 0.25)
+			let acknowledged = presented.wait(timeout: .now() + 0.25) == .success
+			var evidence: [String: Any] = [
+				"overlayRequested": true,
+				"overlayPresented": acknowledged && visible.value,
+				"overlayRenderer": "native",
+				"visualAckMs": elapsedMs(startedAt),
+			]
+			if !acknowledged { evidence["overlayError"] = "presentation_timeout" }
+			else if !visible.value { evidence["overlayError"] = "not_visible" }
+			cursorVisualEvidence = evidence
+			return evidence
 		}
 
 		func focusTargetForPhysicalInput() {
@@ -2303,7 +2334,12 @@ final class Bridge {
 					performed["grounding"] = "description"
 					performed["delivery"] = "ax"
 					performed["valueWrite"] = "verified"
-					return finish(["outcome": "worked", "performed": performed, "evidence": ["value": value]])
+					if !insideWebArea {
+						return finish(["outcome": "worked", "performed": performed, "evidence": ["value": value, "eventDispatch": "not_required"]])
+					}
+					if policy == "ax_only" {
+						return finish(["outcome": "unknown", "performed": performed, "evidence": ["value": value, "eventDispatch": "not_verified"]])
+					}
 				}
 				if !insideWebArea && policy != "foreground" {
 					throw BridgeFailure(message: "The background accessibility value write was accepted but did not take effect", code: "foreground_required")
@@ -2331,7 +2367,7 @@ final class Bridge {
 				performed["grounding"] = "keyboard-events"
 				performed["delivery"] = delivery
 				performed["selectionGrounding"] = selected ? "ax" : "keyboard"
-				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value]])
+				return finish(["outcome": value == text ? "worked" : "didnt", "performed": performed, "evidence": ["value": value, "eventDispatch": "keyboard-events"]])
 			}
 			if status == .success {
 				performed["grounding"] = "description"

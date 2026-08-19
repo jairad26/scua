@@ -352,7 +352,8 @@ async function run() {
 		};
 
 		// Two processes observe the same physical Calculator window at one epoch,
-		// then race writes. Exactly one should advance it; the other must fail stale.
+		// then race writes. One advances the epoch; the other must refresh and retry
+		// exactly once because moveMouse has no ambiguous application side effect.
 		const calculator = targets[0];
 		const competing = await Promise.all(clients.slice(0, 2).map((client) => prepareDesktopCursorTask(client, calculator)));
 		const contentionStartedAt = performance.now();
@@ -361,13 +362,19 @@ async function run() {
 				stateId: task.stateId,
 				actions: [{ action: "moveMouse", x: task.width * (index === 0 ? 0.35 : 0.65), y: task.height * 0.5 }],
 			}, 45_000);
-			return { agentId: task.client.agentId, ok: call.ok, durationMs: call.durationMs, text: call.text };
+			return {
+				agentId: task.client.agentId,
+				ok: call.ok,
+				durationMs: call.durationMs,
+				text: call.text,
+				automaticStaleRecovery: call.details?.execution?.evidence?.automaticStaleRecovery === true,
+			};
 		}));
 		report.contention = {
 			wallMs: performance.now() - contentionStartedAt,
 			results: contentionResults,
 			successCount: contentionResults.filter((result) => result.ok).length,
-			staleRejectionCount: contentionResults.filter((result) => !result.ok && /stale/i.test(result.text)).length,
+			recoveryCount: contentionResults.filter((result) => result.automaticStaleRecovery).length,
 		};
 
 		const browserPass = parallelRounds.every((round) => round.results.length === 3)
@@ -376,7 +383,7 @@ async function run() {
 		const deliverySafe = cursorResults.every((result) => result.execution?.delivery !== "hid" && result.execution?.performed?.activated !== true && result.execution?.performed?.raised !== true);
 		const cursorPass = report.desktopCursors.overlayCount >= 3 && report.desktopCursors.focusUnchanged && report.desktopCursors.mouseDistance <= 0.5 && deliverySafe;
 		report.desktopCursors.deliverySafe = deliverySafe;
-		const contentionPass = report.contention.successCount === 1 && report.contention.staleRejectionCount === 1;
+		const contentionPass = report.contention.successCount === 2 && report.contention.recoveryCount >= 1;
 		report.pass = { browser: browserPass, desktopCursors: cursorPass, contention: contentionPass, overall: browserPass && cursorPass && contentionPass };
 	} finally {
 		await Promise.allSettled(clients.map((client) => client.close()));

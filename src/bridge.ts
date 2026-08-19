@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionDetailedForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpCursorEvidence, type CdpPageSnapshot } from "./cdp.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
@@ -17,7 +17,8 @@ import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
-import { ResourceScheduler } from "./runtime.ts";
+import { ResourceScheduler, StaleResourceStateError } from "./runtime.ts";
+import { rebindActParams } from "./rebind.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
 import { claimCurrentActorResource, currentActorId, withCurrentActorMutation } from "./control-plane.ts";
@@ -2323,11 +2324,27 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	const state = operationState();
 	state.currentImageMode = "auto";
 	validateStateId(params.stateId);
-	const look = currentLookOrThrow();
+	let look = currentLookOrThrow();
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
+	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
+	if (!state.currentTarget || !sameRootIdentity(state.currentTarget, target)) {
+		throw new Error("The target root changed after observation. Reobserve the exact root before dispatch; no action was delivered.");
+	}
+	const resourceKey = desktopResourceKey(target);
+	let imageHydrationMs: number | undefined;
+	let visualSideEffect: boolean;
+	try {
+		visualSideEffect = transactionNeedsVerifiedVisualDelivery(actions, look, getComputerUseConfig().headless);
+	} catch (error) {
+		if (!/image-bearing (?:root|state)/i.test(error instanceof Error ? error.message : String(error))) throw error;
+		const hydrationStartedAt = Date.now();
+		const hydrated = (await resourceScheduler.readAt(resourceKey, state.epoch ?? resourceScheduler.epoch(resourceKey), async () => await captureCurrentTarget(signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target, true))).value;
+		look = hydrated.look;
+		imageHydrationMs = Date.now() - hydrationStartedAt;
+		visualSideEffect = transactionNeedsVerifiedVisualDelivery(actions, look, getComputerUseConfig().headless);
+	}
 	const condition = params.expect ? validateCondition(params.expect) : undefined;
 	const guards = validatedGuards(params.guards, look.parsedOutline!);
-	const visualSideEffect = transactionNeedsVerifiedVisualDelivery(actions, look, getComputerUseConfig().headless);
 	if (visualSideEffect && !condition) {
 		throw new Error("Visual-only activation and drag actions require expect so SCUA can verify the postcondition instead of guessing whether background delivery worked.");
 	}
@@ -2335,17 +2352,16 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 		throw new Error("The visual-only action postcondition is already satisfied in the base state, so it cannot verify this action. Choose a condition that the action must newly establish.");
 	}
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
-	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
-	if (!state.currentTarget || !sameRootIdentity(state.currentTarget, target)) {
-		throw new Error("The target root changed after observation. Reobserve the exact root before dispatch; no action was delivered.");
-	}
 	const noteBefore = state.currentNote;
-	const resourceKey = desktopResourceKey(target);
 	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		const deliveryStartedAt = Date.now();
 		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
-		execution.evidence = { ...execution.evidence, deliveryMs: Date.now() - deliveryStartedAt };
+		execution.evidence = {
+			...execution.evidence,
+			deliveryMs: Date.now() - deliveryStartedAt,
+			...(imageHydrationMs !== undefined ? { imageHydratedForAction: true, imageHydrationMs } : {}),
+		};
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {
 			if (condition) {
@@ -2466,8 +2482,11 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 		const deliverActions = async () => {
 			for (const { action, target } of prepared) {
 				try {
-					const worked = await cdpPerformActionForContext(contextId, visualAgentId(), action, target?.backendNodeId);
-					if (!worked) throw new Error("CDP could not deliver the action to its target.");
+					const delivered = await cdpPerformActionDetailedForContext(contextId, visualAgentId(), action, target?.backendNodeId);
+					if (!delivered?.worked) throw new Error("CDP could not deliver the action to its target.");
+					const cursorVisuals = ((execution.evidence as Record<string, unknown>).cursorVisuals as CdpCursorEvidence[] | undefined) ?? [];
+					cursorVisuals.push(delivered.cursor);
+					(execution.evidence as Record<string, unknown>).cursorVisuals = cursorVisuals;
 					(execution.evidence as Record<string, unknown>).dispatchedActions = Number((execution.evidence as Record<string, unknown>).dispatchedActions) + 1;
 				} catch (error) {
 					const dispatchedActions = Number((execution.evidence as Record<string, unknown>).dispatchedActions);
@@ -2570,8 +2589,42 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
 	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
 	for (const action of actions) validateActionTarget(action);
-	if (operationState().contextId) return await performBrowserTransaction(params, actions, signal);
-	return await performDesktopTransaction(params, actions, signal);
+	const baseOutline = operationState().currentOutline
+		? restoreOutline(serializeOutline(operationState().currentOutline!))
+		: operationState().browserSnapshot
+			? restoreOutline(operationState().browserSnapshot!.outline)
+			: undefined;
+	const execute = async (candidate: ActParams) => operationState().contextId
+		? await performBrowserTransaction(candidate, candidate.actions ?? [], signal)
+		: await performDesktopTransaction(candidate, candidate.actions ?? [], signal);
+	try {
+		return await execute(params);
+	} catch (error) {
+		const enriched = error && typeof error === "object" ? error as { code?: string; delivery?: string } : undefined;
+		const message = error instanceof Error ? error.message : String(error);
+		const recoverable = error instanceof LiveGuardError
+			|| error instanceof StaleResourceStateError
+			|| enriched?.delivery === "definitely_not_delivered" && ["guard_failed", "stale_look", "stale_ref", "element_ref_invalid", "stale_state"].includes(enriched.code ?? "")
+			|| /target root changed after observation|live ui changed after observation/i.test(message);
+		if (!recoverable || !baseOutline) throw error;
+
+		const recoveryStartedAt = Date.now();
+		await performObserve({ stateId: params.stateId, mode: "semantic" }, signal);
+		const refreshedOutline = operationState().currentOutline
+			?? (operationState().browserSnapshot ? restoreOutline(operationState().browserSnapshot!.outline) : undefined);
+		const refreshedStateId = operationState().currentCapture?.stateId ?? operationState().browserSnapshot?.snapshotId;
+		if (!refreshedOutline || !refreshedStateId) throw error;
+		const rebound = rebindActParams(params, baseOutline, refreshedOutline, refreshedStateId);
+		for (const action of rebound.params.actions ?? []) validateActionTarget(action);
+		const result = await execute(rebound.params);
+		result.details.execution.evidence = {
+			...result.details.execution.evidence,
+			automaticStaleRecovery: true,
+			recoveryMs: Date.now() - recoveryStartedAt,
+			reboundRefs: rebound.mappings,
+		};
+		return result;
+	}
 }
 
 function managedBrowserExecutableCandidates(browser: "helium" | "chrome"): string[] {

@@ -24,9 +24,14 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const SETUP_HELPER_SCRIPT = path.join(PACKAGE_ROOT, "scripts", "setup-helper.mjs");
 
 export class HelperTransportError extends Error {
-	constructor(message: string) {
+	readonly code?: string;
+	readonly phase: "not_connected" | "sent" | "response_started";
+
+	constructor(message: string, options: { code?: string; phase?: "not_connected" | "sent" | "response_started" } = {}) {
 		super(message);
 		this.name = "HelperTransportError";
+		this.code = options.code;
+		this.phase = options.phase ?? "not_connected";
 	}
 }
 
@@ -138,6 +143,7 @@ export async function runProcess(
 
 export class MacosHelperClient {
 	private daemonAvailable = false;
+	private ensureDaemonPromise?: Promise<boolean>;
 	private requestSequence = 0;
 	private diagnosticsCache?: PlatformDiagnostics;
 
@@ -179,48 +185,76 @@ export class MacosHelperClient {
 			const id = `req_${++this.requestSequence}`;
 			const socket = net.createConnection(HELPER_SOCKET_PATH);
 			let buffer = "";
-			const timer = setTimeout(() => { socket.destroy(); reject(new HelperTransportError(`Daemon command '${cmd}' timed out after ${timeoutMs}ms.`)); }, timeoutMs);
+			let phase: HelperTransportError["phase"] = "not_connected";
+			let settled = false;
+			const finish = (work: () => void) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				work();
+			};
+			const timer = setTimeout(() => {
+				socket.destroy();
+				finish(() => reject(new HelperTransportError(`Daemon command '${cmd}' timed out after ${timeoutMs}ms.`, { phase })));
+			}, timeoutMs);
 			const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
-			const onAbort = () => { socket.destroy(); cleanup(); reject(new Error("Operation aborted.")); };
+			const onAbort = () => { socket.destroy(); finish(() => reject(new Error("Operation aborted."))); };
 			signal?.addEventListener("abort", onAbort, { once: true });
 			socket.setEncoding("utf8");
-			socket.on("connect", () => socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`));
+			socket.on("connect", () => {
+				phase = "sent";
+				socket.write(`${JSON.stringify({ id, cmd, ...args })}\n`);
+			});
 			socket.on("data", (chunk) => {
+				phase = "response_started";
 				buffer += chunk;
 				const newline = buffer.indexOf("\n");
 				if (newline < 0) return;
-				cleanup();
 				socket.end();
 				try {
 					const parsed = JSON.parse(buffer.slice(0, newline));
-					if (parsed.ok === true) resolve(parsed.result as T);
-					else reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code));
+					if (parsed.ok === true) finish(() => resolve(parsed.result as T));
+					else finish(() => reject(new HelperCommandError(parsed?.error?.message ?? `Daemon command '${cmd}' failed.`, parsed?.error?.code)));
 				} catch (error) {
-					reject(error);
+					finish(() => reject(error));
 				}
 			});
-			socket.on("error", (error) => { cleanup(); reject(new HelperTransportError(error.message)); });
+			socket.on("error", (error) => {
+				const transport = error as NodeJS.ErrnoException;
+				finish(() => reject(new HelperTransportError(transport.message, { code: transport.code, phase })));
+			});
 		});
 	}
 
-	async ensureDaemon(signal?: AbortSignal): Promise<boolean> {
+	private async ensureDaemonOnce(): Promise<boolean> {
 		if (this.daemonAvailable) return true;
 		try {
-			await this.daemonCommand("diagnostics", {}, 1_000, signal);
+			await this.daemonCommand("diagnostics", {}, 1_000);
 			this.daemonAvailable = true;
 			return true;
 		} catch {}
-		await this.launchDaemon(signal).catch(() => undefined);
+		await this.launchDaemon().catch(() => undefined);
 		for (let index = 0; index < 30; index += 1) {
 			try {
-				await this.daemonCommand("diagnostics", {}, 1_000, signal);
+				await this.daemonCommand("diagnostics", {}, 1_000);
 				this.daemonAvailable = true;
 				return true;
 			} catch {
-				await sleep(100, signal);
+				await sleep(100);
 			}
 		}
 		return false;
+	}
+
+	async ensureDaemon(signal?: AbortSignal): Promise<boolean> {
+		throwIfAborted(signal);
+		if (this.daemonAvailable) return true;
+		this.ensureDaemonPromise ??= this.ensureDaemonOnce().finally(() => {
+			this.ensureDaemonPromise = undefined;
+		});
+		const available = await this.ensureDaemonPromise;
+		throwIfAborted(signal);
+		return available;
 	}
 
 	async command<T>(cmd: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<T> {
@@ -228,12 +262,23 @@ export class MacosHelperClient {
 		if (!(await this.ensureDaemon(options?.signal))) {
 			throw new HelperTransportError(`pi-computer-use helper app daemon is unavailable at ${HELPER_APP_PATH}.`);
 		}
-		try {
-			return await this.daemonCommand<T>(cmd, args, timeoutMs, options?.signal);
-		} catch (error) {
-			this.daemonAvailable = false;
-			throw error instanceof Error ? error : new Error(String(error));
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			try {
+				return await this.daemonCommand<T>(cmd, args, timeoutMs, options?.signal);
+			} catch (error) {
+				if (!(error instanceof HelperTransportError)) {
+					throw error instanceof Error ? error : new Error(String(error));
+				}
+				this.daemonAvailable = false;
+				const safePreSendRetry = attempt === 0
+					&& error.phase === "not_connected"
+					&& (error.code === "ECONNREFUSED" || error.code === "ENOENT");
+				if (!safePreSendRetry) throw error;
+				await sleep(15 + Math.floor(Math.random() * 35), options?.signal);
+				if (!(await this.ensureDaemon(options?.signal))) throw error;
+			}
 		}
+		throw new HelperTransportError(`Daemon command '${cmd}' exhausted its safe retry budget.`);
 	}
 
 	async restart(signal?: AbortSignal): Promise<void> {

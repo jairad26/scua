@@ -133,6 +133,9 @@ export class CdpTab {
 	/** Evaluates a JS expression in the page and returns its primitive value. */
 	async evaluate(expression: string): Promise<unknown> {
 		const result = await this.send("Runtime.evaluate", { expression, returnByValue: true, timeout: COMMAND_TIMEOUT_MS, awaitPromise: true });
+		if (result?.exceptionDetails) {
+			throw new Error(`CDP page evaluation threw: ${result.exceptionDetails.text ?? "unknown exception"}`);
+		}
 		return result?.result?.value;
 	}
 
@@ -562,33 +565,63 @@ export async function cdpAnimateCursorForContext(contextId: string, agentId: str
 	})) === true;
 }
 
+export interface CdpCursorEvidence {
+	overlayRequested: true;
+	overlayPresented: boolean;
+	overlayRenderer: "cdp";
+	visualAckMs: number;
+	overlayError?: string;
+}
+
+export interface CdpActionDelivery {
+	worked: boolean;
+	cursor: CdpCursorEvidence;
+}
+
 /** One browser action and its visual cursor share a single CDP connection. */
-export async function cdpPerformActionForContext(contextId: string, agentId: string, action: UiAction, backendNodeId?: number): Promise<boolean> {
-	return (await withCdpContextTab(contextId, async (tab) => {
+export async function cdpPerformActionDetailedForContext(contextId: string, agentId: string, action: UiAction, backendNodeId?: number): Promise<CdpActionDelivery | undefined> {
+	return await withCdpContextTab(contextId, async (tab) => {
 		const point = Number.isFinite(action.x) && Number.isFinite(action.y) ? { x: action.x!, y: action.y! } : undefined;
-		await tab.animateAgentCursor(agentId, backendNodeId, point).catch(() => undefined);
+		const visualStartedAt = Date.now();
+		let cursor: CdpCursorEvidence;
+		try {
+			await tab.animateAgentCursor(agentId, backendNodeId, point);
+			cursor = { overlayRequested: true, overlayPresented: true, overlayRenderer: "cdp", visualAckMs: Date.now() - visualStartedAt };
+		} catch (error) {
+			cursor = {
+				overlayRequested: true,
+				overlayPresented: false,
+				overlayRenderer: "cdp",
+				visualAckMs: Date.now() - visualStartedAt,
+				overlayError: error instanceof Error ? error.message : String(error),
+			};
+		}
+		let worked = true;
 		if (action.action === "press" || (action.action === "click" && action.ref)) {
-			if (!backendNodeId) return false;
-			for (let count = 0; count < (action.clickCount ?? 1); count += 1) if (!await tab.clickBackendNode(backendNodeId)) return false;
+			if (!backendNodeId) worked = false;
+			else for (let count = 0; count < (action.clickCount ?? 1); count += 1) if (!await tab.clickBackendNode(backendNodeId)) worked = false;
 		} else if (action.action === "click") {
-			if (!await tab.clickAt(action.x!, action.y!, action.button ?? "left", action.clickCount ?? 1)) return false;
+			if (!await tab.clickAt(action.x!, action.y!, action.button ?? "left", action.clickCount ?? 1)) worked = false;
 		} else if (action.action === "setText") {
-			if (!backendNodeId) return false;
-			if (!await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", true)) return false;
+			if (!backendNodeId || !await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", true)) worked = false;
 		} else if (action.action === "typeText") {
-			if (backendNodeId) { if (!await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", false)) return false; }
+			if (backendNodeId) { if (!await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", false)) worked = false; }
 			else await tab.typeIntoFocused(action.text ?? "");
 		} else if (action.action === "keypress") await tab.keypress(action.keys ?? []);
 		else if (action.action === "scroll") await tab.scrollBy(action.scrollX ?? 0, action.scrollY ?? 0, backendNodeId);
 		else if (action.action === "drag") {
 			const path = (action.path ?? []).map((item) => Array.isArray(item) ? { x: item[0], y: item[1] } : item);
-			if (!await tab.dragAt(path)) return false;
+			if (!await tab.dragAt(path)) worked = false;
 		} else if (action.action === "moveMouse") {
 			// The independent agent cursor is visual-only; never move or synthesize
 			// the user's browser pointer merely to display agent intent.
 		}
-		return true;
-	})) === true;
+		return { worked, cursor };
+	});
+}
+
+export async function cdpPerformActionForContext(contextId: string, agentId: string, action: UiAction, backendNodeId?: number): Promise<boolean> {
+	return (await cdpPerformActionDetailedForContext(contextId, agentId, action, backendNodeId))?.worked === true;
 }
 
 export async function cdpTypeForContext(contextId: string, backendNodeId: number, text: string, replace: boolean): Promise<boolean> {

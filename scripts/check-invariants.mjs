@@ -185,6 +185,17 @@ check("INV-10 adaptive plans fail closed", () => {
 	assert(ts.includes("params.stateId && isBrowserContextId(state.contextId)"), "state-based plan refresh can lose its CDP backend context");
 });
 
+check("executor recovery and visual acknowledgement stay explicit", () => {
+	assert(ts.includes("imageHydratedForAction") && ts.includes("imageHydrationMs"), "coordinate fallback does not expose lazy image hydration evidence");
+	assert(ts.includes("automaticStaleRecovery") && ts.includes("rebindActParams"), "one-shot stale target recovery is missing");
+	assert(swift.includes('listen(server, 128)'), "native helper socket backlog is not sized for concurrent workers");
+	assert(swift.includes('"eventDispatch": "keyboard-events"'), "web-backed setText does not expose keyboard event delivery");
+	assert(swift.includes('"overlayPresented"') && swift.includes('"visualAckMs"'), "native cursor overlay acknowledgement evidence is missing");
+	assert(swift.includes("cursorVisualEvidence") && swift.includes('enriched["evidence"] = evidence'), "native cursor acknowledgement is not attached to every cursor-bearing action");
+	assert(agentCursorSwift.includes("static func isVisible(agentId: String)"), "native cursor acknowledgement cannot inspect its agent overlay");
+	assert(cdpTs.includes("CdpCursorEvidence") && cdpTs.includes("overlayPresented"), "browser cursor overlay acknowledgement evidence is missing");
+});
+
 check("INV-11 unified agent contract", () => {
 	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
 	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);

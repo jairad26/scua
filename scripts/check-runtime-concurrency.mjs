@@ -6,6 +6,7 @@ import path from "node:path";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction } from "../src/actions.ts";
 import { searchMayEscalateToDesktopOcr, transactionNeedsVerifiedVisualDelivery } from "../src/bridge.ts";
 import { nodeByRef, parseLookResponse } from "../src/outline.ts";
+import { rebindActParams, TargetRebindError } from "../src/rebind.ts";
 import { ResourceScheduler, StateStore, StaleResourceStateError } from "../src/runtime.ts";
 import { changesBetween, stabilizeRefs } from "../src/view.ts";
 
@@ -68,6 +69,11 @@ assert.equal(preparedClick.establishesFocus, true, "editable semantic clicks sho
 assert("x" in preparedClick.target, "text-input clicks should use their observed center to establish deterministic focus");
 assert.equal(preparedClick.needsForeground, true, "text-input clicks should establish focus through foreground pointer input");
 assert.equal(transactionNeedsVerifiedVisualDelivery([{ action: "click", ref: editor.ref }], nextLook, false), true, "prepared coordinate click bypassed the visual postcondition guard");
+assert.throws(
+	() => transactionNeedsVerifiedVisualDelivery([{ action: "click", ref: editor.ref }], { ...nextLook, image: undefined }, false),
+	/image-bearing/,
+	"coordinate fallback did not request lazy image hydration",
+);
 const pictureTarget = { ...editor, ref: "@e-picture", wireRef: undefined, isTextInput: false, pictureOnly: true };
 const pictureClick = prepareAction({ action: "click", ref: pictureTarget.ref }, { currentFocus: false }, { ...actionEnv, node: () => pictureTarget });
 assert.equal(pictureClick.needsForeground, true, "picture-only clicks should use foreground pointer delivery");
@@ -83,6 +89,52 @@ assert.equal(outcomeAfterObservedValues("didnt", [{ action: "setText", ref: "@e1
 assert.equal(outcomeAfterObservedTransition("unknown", [{ action: "press", ref: "@e1" }], 1), "worked", "a changed successor did not verify a semantic press");
 assert.equal(outcomeAfterObservedTransition("unknown", [{ action: "moveMouse", ref: "@e1" }], 1), "unknown", "visual cursor motion was incorrectly treated as a UI outcome");
 assert.equal(outcomeAfterObservedTransition("didnt", [{ action: "press", ref: "@e1" }], 1), "didnt", "implicit successor evidence overrode explicit negative evidence");
+
+const rebindBase = rawLook("rebind-base", [
+	{ ref: "old-search", role: "AXTextField", title: "Search", identifier: "search-input", rect: { x: 100, y: 50, w: 300, h: 30 } },
+]);
+const rebindFresh = rawLook("rebind-fresh", [
+	{ ref: "new-search", role: "AXTextField", title: "Search", identifier: "search-input", rect: { x: 110, y: 50, w: 300, h: 30 } },
+]);
+const oldSearch = rebindBase.parsedOutline.nodes.find((node) => node.wireRef === "old-search");
+const newSearch = rebindFresh.parsedOutline.nodes.find((node) => node.wireRef === "new-search");
+assert(oldSearch && newSearch, "rebind fixture was not parsed");
+const rebound = rebindActParams({
+	stateId: "stale-state",
+	actions: [{ action: "setText", ref: oldSearch.ref, text: "Anirudh" }],
+	guards: [{ kind: "exists", ref: oldSearch.ref, scopeRef: oldSearch.ref }],
+	expect: { kind: "value", ref: oldSearch.ref, value: "Anirudh" },
+}, rebindBase.parsedOutline, rebindFresh.parsedOutline, "fresh-state");
+assert.equal(rebound.params.stateId, "fresh-state", "stale recovery retained the stale state id");
+assert.equal(rebound.params.actions[0].ref, newSearch.ref, "stale action ref was not rebound");
+assert.equal(rebound.params.guards[0].ref, newSearch.ref, "stale guard ref was not rebound");
+assert.equal(rebound.params.guards[0].scopeRef, newSearch.ref, "stale guard scope was not rebound");
+assert.equal(rebound.params.expect.ref, newSearch.ref, "stale expectation ref was not rebound");
+assert.equal(rebound.mappings[0].matchedBy, "identifier_role", "stable identifier was not preferred for rebinding");
+
+const geometryBase = rawLook("geometry-base", [
+	{ ref: "old-row", role: "AXButton", title: "Play", rect: { x: 50, y: 50, w: 20, h: 20 } },
+]);
+const geometryFresh = rawLook("geometry-fresh", [
+	{ ref: "row-near", role: "AXButton", title: "Play", rect: { x: 52, y: 50, w: 20, h: 20 } },
+	{ ref: "row-far", role: "AXButton", title: "Play", rect: { x: 500, y: 50, w: 20, h: 20 } },
+]);
+const oldRow = geometryBase.parsedOutline.nodes.find((node) => node.wireRef === "old-row");
+const nearRow = geometryFresh.parsedOutline.nodes.find((node) => node.wireRef === "row-near");
+assert(oldRow && nearRow, "geometry rebind fixture was not parsed");
+const geometryRebound = rebindActParams({ stateId: "old", actions: [{ action: "press", ref: oldRow.ref }] }, geometryBase.parsedOutline, geometryFresh.parsedOutline, "new");
+assert.equal(geometryRebound.params.actions[0].ref, nearRow.ref, "geometry tie-breaker selected the wrong semantic peer");
+assert.equal(geometryRebound.mappings[0].matchedBy, "geometry_tiebreaker", "ambiguous semantic peers did not use geometry only as a tie-breaker");
+
+const ambiguousFresh = rawLook("ambiguous-fresh", [
+	{ ref: "row-a", role: "AXButton", title: "Play", rect: { x: 40, y: 50, w: 20, h: 20 } },
+	{ ref: "row-b", role: "AXButton", title: "Play", rect: { x: 60, y: 50, w: 20, h: 20 } },
+]);
+assert.throws(
+	() => rebindActParams({ stateId: "old", actions: [{ action: "press", ref: oldRow.ref }] }, geometryBase.parsedOutline, ambiguousFresh.parsedOutline, "new"),
+	(error) => error instanceof TargetRebindError && error.delivery === "definitely_not_delivered",
+	"ambiguous stale target was guessed instead of failing closed",
+);
 
 const schedulerDirectory = mkdtempSync(path.join(os.tmpdir(), "scua-runtime-test-"));
 const scheduler = new ResourceScheduler({ sharedDirectory: schedulerDirectory, sessionId: "scheduler-a" });

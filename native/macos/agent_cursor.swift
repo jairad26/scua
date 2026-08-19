@@ -128,6 +128,10 @@ final class AgentCursor {
         agentCursors.values.filter { $0.overlay?.isVisible == true }.count
     }
 
+    static func isVisible(agentId: String) -> Bool {
+        agentCursors[agentId]?.overlay?.isVisible == true
+    }
+
     static func resetAgentCursors() {
         for cursor in agentCursors.values {
             cursor.idleHideTask?.cancel()
