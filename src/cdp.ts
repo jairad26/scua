@@ -7,6 +7,7 @@
 // keeps the AX/CGEvent path, so with the env var unset this module is inert.
 
 import { randomUUID } from "node:crypto";
+import type { UiAction } from "./contract.ts";
 import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
 
 export interface CdpConsoleEntry {
@@ -65,6 +66,7 @@ const CDP_CONTEXT_PREFIX = "browser:";
 const NAVIGATE_LOAD_TIMEOUT_MS = 10_000;
 const CONNECT_FAILURE_RETRY_MS = 5_000;
 const CONSOLE_BUFFER_LIMIT = 20;
+const AGENT_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72" aria-hidden="true"><path d="M0.682965 3.11905 C0.221806 1.70377 1.58003 0.372346 2.9857 0.861234 L10.7142 3.55264 C12.251 4.08807 12.3448 6.22659 10.8607 6.89444 L8.00523 8.17764 L6.53257 11.1269 C5.81241 12.5653 3.71102 12.4084 3.21226 10.8788 L0.682965 3.11905 Z" transform="translate(24 23) scale(2)" fill="#0d0d0d" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
 
 export class CdpTab {
 	private nextId = 1;
@@ -139,6 +141,52 @@ export class CdpTab {
 		return Array.isArray(result?.nodes) ? result.nodes : [];
 	}
 
+	/** Monotonic page-local DOM generation installed without changing page UI. */
+	async mutationGeneration(): Promise<number> {
+		const value = await this.evaluate(`(() => {
+			const key = '__scuaMutationState';
+			if (!globalThis[key]) {
+				const state = { generation: 0, waiters: [] };
+				const notify = () => {
+					state.generation += 1;
+					const waiters = state.waiters.splice(0);
+					for (const waiter of waiters) waiter(state.generation);
+				};
+				const observer = new MutationObserver(notify);
+				observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+				state.observer = observer;
+				globalThis[key] = state;
+			}
+			return globalThis[key].generation;
+		})()`);
+		return Number.isFinite(value) ? Math.max(0, Math.trunc(Number(value))) : 0;
+	}
+
+	/** Wait for a DOM mutation without repeatedly fetching the accessibility tree. */
+	async waitForMutation(since: number, timeoutMs: number): Promise<number> {
+		const boundedTimeoutMs = Math.max(0, Math.min(4_000, Math.trunc(timeoutMs)));
+		const value = await this.evaluate(`(async () => {
+			const key = '__scuaMutationState';
+			if (!globalThis[key]) {
+				const state = { generation: 0, waiters: [] };
+				const notify = () => { state.generation += 1; const waiters = state.waiters.splice(0); for (const waiter of waiters) waiter(state.generation); };
+				const observer = new MutationObserver(notify);
+				observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+				state.observer = observer;
+				globalThis[key] = state;
+			}
+			const state = globalThis[key];
+			if (state.generation !== ${JSON.stringify(since)}) return state.generation;
+			return await new Promise((resolve) => {
+				let settled = false;
+				const finish = (generation) => { if (settled) return; settled = true; clearTimeout(timer); resolve(generation); };
+				const timer = setTimeout(() => finish(state.generation), ${JSON.stringify(boundedTimeoutMs)});
+				state.waiters.push(finish);
+			});
+		})()`);
+		return Number.isFinite(value) ? Math.trunc(Number(value)) : since;
+	}
+
 	async navigate(url: string): Promise<void> {
 		const loaded = new Promise<void>((resolve) => {
 			this.loadFired = resolve;
@@ -152,12 +200,66 @@ export class CdpTab {
 		}
 	}
 
-	async clickBackendNode(backendNodeId: number): Promise<void> {
-		await this.withBackendNode(backendNodeId, "function(){ this.scrollIntoView({block:'center', inline:'center'}); this.click(); }");
+	async bringToFront(): Promise<void> {
+		await this.send("Page.bringToFront");
 	}
 
-	async typeIntoBackendNode(backendNodeId: number, text: string, replace: boolean): Promise<void> {
-		await this.withBackendNode(backendNodeId, "function(text, replace){ this.scrollIntoView({block:'center', inline:'center'}); this.focus(); if (replace) { if ('value' in this) this.value = ''; else this.textContent = ''; } if ('value' in this) this.value += text; else this.textContent = (this.textContent || '') + text; this.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text})); this.dispatchEvent(new Event('change', {bubbles:true})); }", [text, replace]);
+	async clickBackendNode(backendNodeId: number): Promise<boolean> {
+		return (await this.withBackendNode(backendNodeId, "function(){ if (!this.isConnected) return false; this.scrollIntoView({block:'center', inline:'center'}); this.click(); return true; }")) === true;
+	}
+
+	async animateAgentCursor(agentId: string, backendNodeId?: number, point?: { x: number; y: number }): Promise<void> {
+		const script = `(() => {
+			const id = ${JSON.stringify(`scua-agent-cursor-${agentId}`)};
+			let cursor = document.getElementById(id);
+			if (!cursor) {
+				cursor = document.createElement('div');
+				cursor.id = id;
+				Object.assign(cursor.style, {
+					position: 'fixed', width: '72px', height: '72px', pointerEvents: 'none', zIndex: '2147483647',
+					transition: 'left 180ms cubic-bezier(.2,.9,.2,1), top 180ms cubic-bezier(.2,.9,.2,1), opacity 120ms',
+					opacity: '0'
+				});
+				cursor.innerHTML = ${JSON.stringify(AGENT_CURSOR_SVG)};
+				document.documentElement.appendChild(cursor);
+			}
+			const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+			const glyph = cursor.querySelector('path');
+			glyph.style.filter = isDark
+				? 'drop-shadow(0 0 13px rgba(0,0,0,.58))'
+				: 'drop-shadow(0 0 13px rgba(255,255,255,.72))';
+			const target = ${JSON.stringify(point ?? null)};
+			if (target) { cursor.style.left = (target.x - 25) + 'px'; cursor.style.top = (target.y - 29) + 'px'; }
+			cursor.style.opacity = '1';
+			clearTimeout(cursor.__scuaHideTimer);
+			cursor.__scuaHideTimer = setTimeout(() => { cursor.style.opacity = '0'; }, 20_000);
+		})()`;
+		if (backendNodeId) {
+			await this.withBackendNode(backendNodeId, `function(agentId, svg){
+				this.scrollIntoView({block:'center', inline:'center'});
+				const rect = this.getBoundingClientRect();
+				const point = {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+				const id = 'scua-agent-cursor-' + agentId;
+				let cursor = document.getElementById(id);
+				if (!cursor) {
+					cursor = document.createElement('div'); cursor.id = id;
+					Object.assign(cursor.style, {position:'fixed',width:'72px',height:'72px',pointerEvents:'none',zIndex:'2147483647',transition:'left 180ms cubic-bezier(.2,.9,.2,1), top 180ms cubic-bezier(.2,.9,.2,1), opacity 120ms',opacity:'0'});
+					cursor.innerHTML=svg;
+					document.documentElement.appendChild(cursor);
+				}
+				const isDark=window.matchMedia('(prefers-color-scheme: dark)').matches;
+				const glyph=cursor.querySelector('path');
+				glyph.style.filter=isDark?'drop-shadow(0 0 13px rgba(0,0,0,.58))':'drop-shadow(0 0 13px rgba(255,255,255,.72))';
+				cursor.style.left=(point.x-25)+'px'; cursor.style.top=(point.y-29)+'px'; cursor.style.opacity='1';
+				clearTimeout(cursor.__scuaHideTimer); cursor.__scuaHideTimer=setTimeout(()=>{cursor.style.opacity='0'},20_000);
+			}`, [agentId, AGENT_CURSOR_SVG]);
+			return;
+		}
+		await this.evaluate(script);
+	}
+
+	async typeIntoBackendNode(backendNodeId: number, text: string, replace: boolean): Promise<boolean> {
+		return (await this.withBackendNode(backendNodeId, "function(text, replace){ if (!this.isConnected) return false; this.scrollIntoView({block:'center', inline:'center'}); this.focus(); if (replace) { if ('value' in this) this.value = ''; else this.textContent = ''; } if ('value' in this) this.value += text; else this.textContent = (this.textContent || '') + text; this.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text})); this.dispatchEvent(new Event('change', {bubbles:true})); return true; }", [text, replace])) === true;
 	}
 
 	async scrollBy(deltaX: number, deltaY: number, backendNodeId?: number): Promise<void> {
@@ -185,6 +287,14 @@ export class CdpTab {
 		await this.send("Input.dispatchMouseEvent", { type, x, y, button: type === "mouseMoved" ? "none" : button, clickCount });
 	}
 
+	async clickAt(x: number, y: number, button: "left" | "right" | "middle", clickCount: number): Promise<boolean> {
+		return (await this.evaluate(`(() => { const target = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)}); if (!target) return false; const button = ${JSON.stringify(button)}; const buttonNumber = button === 'right' ? 2 : button === 'middle' ? 1 : 0; const init = {bubbles:true,cancelable:true,clientX:${JSON.stringify(x)},clientY:${JSON.stringify(y)},button:buttonNumber,detail:${JSON.stringify(clickCount)}}; target.dispatchEvent(new PointerEvent('pointerdown', init)); target.dispatchEvent(new MouseEvent('mousedown', init)); target.dispatchEvent(new PointerEvent('pointerup', init)); target.dispatchEvent(new MouseEvent('mouseup', init)); if (buttonNumber === 0) target.click(); else target.dispatchEvent(new MouseEvent('contextmenu', init)); return true; })()`)) === true;
+	}
+
+	async dragAt(path: Array<{ x: number; y: number }>): Promise<boolean> {
+		return (await this.evaluate(`(() => { const path = ${JSON.stringify(path)}; const first = path[0]; if (!first) return false; const target = document.elementFromPoint(first.x, first.y); if (!target) return false; const event = (type, point, buttons) => target.dispatchEvent(new PointerEvent(type, {bubbles:true,cancelable:true,clientX:point.x,clientY:point.y,button:0,buttons})); event('pointerdown', first, 1); for (const point of path.slice(1)) event('pointermove', point, 1); event('pointerup', path[path.length - 1], 0); return true; })()`)) === true;
+	}
+
 	async dragPath(path: Array<{ x: number; y: number }>): Promise<void> {
 		if (path.length < 2) throw new Error("CDP drag requires at least two points.");
 		await this.mouseAt(path[0].x, path[0].y, "mousePressed");
@@ -193,15 +303,18 @@ export class CdpTab {
 		await this.mouseAt(end.x, end.y, "mouseReleased");
 	}
 
-	private async withBackendNode(backendNodeId: number, functionDeclaration: string, args: unknown[] = []): Promise<void> {
+	private async withBackendNode(backendNodeId: number, functionDeclaration: string, args: unknown[] = []): Promise<unknown> {
 		const resolved = await this.send("DOM.resolveNode", { backendNodeId });
 		const objectId = resolved?.object?.objectId;
 		if (typeof objectId !== "string") throw new Error(`CDP could not resolve backend node ${backendNodeId}.`);
-		await this.send("Runtime.callFunctionOn", {
+		const result = await this.send("Runtime.callFunctionOn", {
 			objectId,
 			functionDeclaration,
 			arguments: args.map((value) => ({ value })),
+			returnByValue: true,
 		});
+		if (result?.exceptionDetails) throw new Error(`CDP page action threw: ${result.exceptionDetails.text ?? result.exceptionDetails.exception?.description ?? "unknown exception"}`);
+		return result?.result?.value;
 	}
 
 	/** Screen bounds of the browser window containing this tab. */
@@ -316,6 +429,36 @@ export function disconnectCdp(): void {
 	lastConnectFailureAt = 0;
 }
 
+/** Close the agent-owned Chromium process through its browser-level CDP endpoint. */
+export async function closeCdpBrowser(port = process.env.PI_COMPUTER_USE_CDP_PORT): Promise<boolean> {
+	if (!port || !/^\d+$/.test(port) || typeof WebSocket === "undefined") return false;
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1_000) });
+		if (!response.ok) return false;
+		const version = await response.json() as { webSocketDebuggerUrl?: string };
+		const wsUrl = version.webSocketDebuggerUrl;
+		if (!wsUrl || !isLocalDebuggerWebSocket(wsUrl, port)) return false;
+		const ws = new WebSocket(wsUrl);
+		return await new Promise<boolean>((resolve) => {
+			let settled = false;
+			const finish = (value: boolean) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				try { ws.close(); } catch {}
+				resolve(value);
+			};
+			const timer = setTimeout(() => finish(false), 1_500);
+			ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Browser.close" }));
+			ws.onmessage = () => finish(true);
+			ws.onclose = () => finish(true);
+			ws.onerror = () => finish(false);
+		});
+	} catch {
+		return false;
+	}
+}
+
 function cdpEnabled(): boolean {
 	const rawPort = process.env.PI_COMPUTER_USE_CDP_PORT ?? "";
 	if (!/^\d+$/.test(rawPort)) return false;
@@ -385,17 +528,72 @@ export async function listCdpPageContexts(): Promise<CdpPageContext[]> {
 	}));
 }
 
+/** Create a new tab in the currently configured agent-owned Chromium process. */
+export async function createCdpPageContext(url: string): Promise<CdpPageContext | undefined> {
+	if (!cdpEnabled()) return undefined;
+	const port = process.env.PI_COMPUTER_USE_CDP_PORT;
+	const response = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
+		method: "PUT",
+		signal: AbortSignal.timeout(2_000),
+	});
+	if (!response.ok) return undefined;
+	const page = await response.json() as CdpPageTarget;
+	if (page.type !== "page" || typeof page.id !== "string") return undefined;
+	return { contextId: cdpContextId(page.id), targetId: page.id, title: page.title ?? "", url: page.url ?? url };
+}
+
 export async function cdpClickForContext(contextId: string, backendNodeId: number): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => {
-		await tab.clickBackendNode(backendNodeId);
+		return await tab.clickBackendNode(backendNodeId);
+	})) === true;
+}
+
+export async function cdpBringToFrontForContext(contextId: string): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async (tab) => {
+		await tab.bringToFront();
+		return true;
+	})) === true;
+}
+
+export async function cdpAnimateCursorForContext(contextId: string, agentId: string, backendNodeId?: number, point?: { x: number; y: number }): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async (tab) => {
+		await tab.animateAgentCursor(agentId, backendNodeId, point);
+		return true;
+	})) === true;
+}
+
+/** One browser action and its visual cursor share a single CDP connection. */
+export async function cdpPerformActionForContext(contextId: string, agentId: string, action: UiAction, backendNodeId?: number): Promise<boolean> {
+	return (await withCdpContextTab(contextId, async (tab) => {
+		const point = Number.isFinite(action.x) && Number.isFinite(action.y) ? { x: action.x!, y: action.y! } : undefined;
+		await tab.animateAgentCursor(agentId, backendNodeId, point).catch(() => undefined);
+		if (action.action === "press" || (action.action === "click" && action.ref)) {
+			if (!backendNodeId) return false;
+			for (let count = 0; count < (action.clickCount ?? 1); count += 1) if (!await tab.clickBackendNode(backendNodeId)) return false;
+		} else if (action.action === "click") {
+			if (!await tab.clickAt(action.x!, action.y!, action.button ?? "left", action.clickCount ?? 1)) return false;
+		} else if (action.action === "setText") {
+			if (!backendNodeId) return false;
+			if (!await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", true)) return false;
+		} else if (action.action === "typeText") {
+			if (backendNodeId) { if (!await tab.typeIntoBackendNode(backendNodeId, action.text ?? "", false)) return false; }
+			else await tab.typeIntoFocused(action.text ?? "");
+		} else if (action.action === "keypress") await tab.keypress(action.keys ?? []);
+		else if (action.action === "scroll") await tab.scrollBy(action.scrollX ?? 0, action.scrollY ?? 0, backendNodeId);
+		else if (action.action === "drag") {
+			const path = (action.path ?? []).map((item) => Array.isArray(item) ? { x: item[0], y: item[1] } : item);
+			if (!await tab.dragAt(path)) return false;
+		} else if (action.action === "moveMouse") {
+			// The independent agent cursor is visual-only; never move or synthesize
+			// the user's browser pointer merely to display agent intent.
+		}
 		return true;
 	})) === true;
 }
 
 export async function cdpTypeForContext(contextId: string, backendNodeId: number, text: string, replace: boolean): Promise<boolean> {
 	return (await withCdpContextTab(contextId, async (tab) => {
-		await tab.typeIntoBackendNode(backendNodeId, text, replace);
-		return true;
+		return await tab.typeIntoBackendNode(backendNodeId, text, replace);
 	})) === true;
 }
 
@@ -430,22 +628,13 @@ export async function cdpNavigateContext(contextId: string, url: string): Promis
 }
 
 export async function cdpEvaluateForContext(contextId: string, expression: string): Promise<CdpEvaluationResult | undefined> {
-	const page = await cdpPageForContext(contextId);
-	if (!page?.webSocketDebuggerUrl) return undefined;
-	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
-	try {
-		return { contextId, value: await tab.evaluate(expression) };
-	} finally {
-		tab.close();
-	}
+	return await withCdpContextTab(contextId, async (tab) => ({ contextId, value: await tab.evaluate(expression) }));
 }
 
 export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageSnapshot | undefined> {
 	const page = await cdpPageForContext(contextId);
 	if (!page?.webSocketDebuggerUrl) return undefined;
-
-	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
-	try {
+	return await withCdpContextTab(contextId, async (tab) => {
 		const [textValue, nodes] = await Promise.all([
 			tab.evaluate("document.body ? document.body.innerText : ''").catch(() => ""),
 			tab.accessibilityTree().catch(() => []),
@@ -464,19 +653,48 @@ export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageS
 			outline,
 			diagnostics: { cdp: "connected", targetCount: targets.length },
 		};
-	} finally {
-		tab.close();
-	}
+	});
+}
+
+export async function cdpMutationGenerationForContext(contextId: string): Promise<number | undefined> {
+	return await withCdpContextTab(contextId, async (tab) => await tab.mutationGeneration());
+}
+
+export async function cdpWaitForMutationForContext(contextId: string, since: number, timeoutMs: number, signal?: AbortSignal): Promise<number | undefined> {
+	const pending = withCdpContextTab(contextId, async (tab) => await tab.waitForMutation(since, timeoutMs));
+	if (!signal) return await pending;
+	if (signal.aborted) throw new Error("Operation aborted.");
+	return await new Promise<number | undefined>((resolve, reject) => {
+		const onAbort = () => { cleanup(); reject(new Error("Operation aborted.")); };
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		signal.addEventListener("abort", onAbort, { once: true });
+		pending.then((value) => { cleanup(); resolve(value); }, (error) => { cleanup(); reject(error); });
+	});
 }
 
 async function withCdpContextTab<T>(contextId: string, run: (tab: CdpTab) => Promise<T>): Promise<T | undefined> {
 	const page = await cdpPageForContext(contextId);
 	if (!page?.webSocketDebuggerUrl) return undefined;
-	const tab = await CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
+	let tab = connectedTabs.get(page.id);
+	if (!tab?.isOpen) {
+		let connecting = connectingTabs.get(page.id);
+		if (!connecting) {
+			connecting = CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
+			connectingTabs.set(page.id, connecting);
+		}
+		try {
+			tab = await connecting;
+			connectedTabs.set(page.id, tab);
+		} finally {
+			connectingTabs.delete(page.id);
+		}
+	}
+	tab.title = page.title;
 	try {
 		return await run(tab);
-	} finally {
-		tab.close();
+	} catch (error) {
+		if (!tab.isOpen) connectedTabs.delete(page.id);
+		throw error;
 	}
 }
 
@@ -484,7 +702,13 @@ async function cdpPageForContext(contextId: string): Promise<CdpPageTarget | und
 	if (!contextId.startsWith(CDP_CONTEXT_PREFIX)) return undefined;
 	const targetId = contextId.slice(CDP_CONTEXT_PREFIX.length);
 	const pages = await cdpPages();
-	return pages.find((candidate) => candidate.id === targetId);
+	const page = pages.find((candidate) => candidate.id === targetId);
+	if (!page) {
+		connectedTabs.get(targetId)?.close();
+		connectedTabs.delete(targetId);
+		connectingTabs.delete(targetId);
+	}
+	return page;
 }
 
 async function cdpPages(): Promise<CdpPageTarget[]> {
@@ -492,9 +716,16 @@ async function cdpPages(): Promise<CdpPageTarget[]> {
 	const port = process.env.PI_COMPUTER_USE_CDP_PORT;
 	const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2_000) });
 	const targets = (await response.json()) as CdpPageTarget[];
-	return targets.filter((target) =>
+	const pages = targets.filter((target) =>
 		target.type === "page" && target.webSocketDebuggerUrl && isLocalDebuggerWebSocket(target.webSocketDebuggerUrl, port),
 	);
+	const liveIds = new Set(pages.map((page) => page.id));
+	for (const [targetId, tab] of connectedTabs) {
+		if (liveIds.has(targetId)) continue;
+		tab.close();
+		connectedTabs.delete(targetId);
+	}
+	return pages;
 }
 
 function cdpContextId(targetId: string): string {

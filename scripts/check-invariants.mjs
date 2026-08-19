@@ -9,9 +9,11 @@ import { countOutlineNodes, foldToBudget, graftScopedOutline, nodeByRef, parseLo
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
 const agentCursorSwift = fs.readFileSync(path.join(root, "native/macos/agent_cursor.swift"), "utf8");
+const agentCursorMotionSwift = fs.readFileSync(path.join(root, "native/macos/agent_cursor_motion.swift"), "utf8");
 const ts = fs.readFileSync(path.join(root, "src/bridge.ts"), "utf8");
 const noteTs = fs.readFileSync(path.join(root, "src/note.ts"), "utf8");
 const configTs = fs.readFileSync(path.join(root, "src/config.ts"), "utf8");
+const cdpTs = fs.readFileSync(path.join(root, "src/cdp.ts"), "utf8");
 const setupHelper = fs.readFileSync(path.join(root, "scripts/setup-helper.mjs"), "utf8");
 const macosHelperPath = fs.readFileSync(path.join(root, "src/platform/macos/helper-path.mjs"), "utf8");
 const srcFiles = fs.readdirSync(path.join(root, "src"), { recursive: true })
@@ -143,8 +145,17 @@ check("INV-9 immutable state ownership", () => {
 });
 
 check("INV-10 resource-keyed scheduling", () => {
-	assert(ts.includes("desktopResourceKey") && ts.includes("resourceScheduler.write"), "desktop writes are not resource scheduled");
+	assert(ts.includes("desktopResourceKey") && ts.includes("resourceScheduler.writeGuarded"), "desktop writes are not resource scheduled with commit guards");
 	assert(!ts.includes("withRuntimeLock"), "global runtime lock remains");
+});
+
+check("INV-10 adaptive plans fail closed", () => {
+	const plan = fs.readFileSync(path.join(root, "src/action-plan.ts"), "utf8");
+	const server = fs.readFileSync(path.join(root, "mcp/server.ts"), "utf8");
+	assert(plan.includes("requires at least one live commit guard") && plan.includes('error.delivery === "definitely_not_delivered"') && plan.includes('error.recovery === "reobserve"'), "adaptive plan retries are not guarded and definitely-undelivered only");
+	assert(plan.includes("blockedBy") && plan.includes("Promise.race(running.values())"), "adaptive plan dependency isolation or concurrent scheduling is missing");
+	assert(server.includes("executeAdaptiveActionPlan") && server.includes("failedNodeResult") && server.includes('execute_plan: executePlanTool'), "MCP adaptive-plan routing or uncertain-outcome handling is missing");
+	assert(ts.includes("params.stateId && isBrowserContextId(state.contextId)"), "state-based plan refresh can lose its CDP backend context");
 });
 
 check("INV-11 unified agent contract", () => {
@@ -183,6 +194,27 @@ check("INV-15 semantic action postconditions", () => {
 	assert(swift.includes("waitForRootChange") && swift.includes("state.change.broadcast()"), "macOS waits are not change-notification assisted");
 });
 
+check("INV-15 cross-platform semantic roles and web-wrapper AXPress", () => {
+	const outline = fs.readFileSync(path.join(root, "src/outline.ts"), "utf8");
+	assert(outline.includes('["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"]'), "search_ui lacks a cross-platform textbox role alias");
+	assert(outline.includes('["radio", "radiobutton"]'), "search_ui lacks a cross-platform radio role alias");
+	const pressBranch = swift.indexOf('if supportsAction(element, action: kAXPressAction as CFString)');
+	const pointerBranch = swift.indexOf('else if requiresPointerFocus && policy != "ax_only"', pressBranch);
+	assert(pressBranch >= 0 && pointerBranch > pressBranch, "web-wrapper AXPress is rejected before the semantic action is attempted");
+});
+
+check("INV-15 bounded successor observations", () => {
+	assert(ts.includes("captureEditedTargets") && ts.includes("scopeRef: wireRefForNode(node)"), "deterministic text writes still require a full successor-tree scan");
+	assert(ts.includes("captureUnchangedCurrentTarget") && ts.includes('action.action === "moveMouse"'), "visual-only pointer moves still rescan unchanged UI state");
+});
+
+check("INV-15 handoffs transfer immutable desktop state", () => {
+	const stateTs = fs.readFileSync(path.join(root, "src/state.ts"), "utf8");
+	const mcpServer = fs.readFileSync(path.join(root, "mcp/server.ts"), "utf8");
+	assert(stateTs.includes("transferLatestDesktop") && stateTs.includes("value.capture.stateId = stateId"), "desktop handoffs do not mint a recipient-owned immutable state");
+	assert(mcpServer.includes("handoffSavedDesktopState") && mcpServer.includes("claim.stateId"), "claim_resource handoff does not return the transferred state ID");
+});
+
 check("INV-16 clean headless contract and non-destructive helper install", () => {
 	assert(!/stealth_mode|stealthMode|PI_COMPUTER_USE_STEALTH|PI_COMPUTER_USE_STRICT_AX/.test(configTs), "obsolete stealth configuration aliases remain");
 	assert(!/tccutil[\s\S]{0,80}reset|resetTcc/i.test(setupHelper), "helper installation can reset macOS privacy grants");
@@ -191,17 +223,45 @@ check("INV-16 clean headless contract and non-destructive helper install", () =>
 	assert(setupHelper.includes("resolveMacosHelperAppPath"), "helper installer bypasses shared macOS path resolution");
 });
 
-check("INV-17 macOS agent cursor stays native, configurable, and background-only", () => {
+check("INV-17 macOS agent cursor and execution presentation stay independently configurable", () => {
 	assert(configTs.includes("cursor_overlay: boolean") && configTs.includes("PI_COMPUTER_USE_CURSOR_OVERLAY"), "agent cursor config is incomplete");
+	assert(configTs.includes('execution_mode: "background" | "foreground"') && configTs.includes("PI_COMPUTER_USE_EXECUTION_MODE"), "execution mode config is incomplete");
+	assert(ts.includes("FOREGROUND_ATTENTION_RESOURCE_KEY") && ts.includes("withForegroundAttention"), "foreground workers can fight over desktop attention");
 	assert(swift.includes('delivery == "pid"'), "physical cursor delivery can display the agent cursor");
 	assert(swift.includes('policy != "ax_only"'), "strict-headless actions can display the agent cursor");
 	assert(swift.includes('request["cursorOverlay"] as? Bool ?? true'), "native helper ignores the cursor overlay flag");
 	assert(swift.includes("app.processIdentifier != getpid()"), "helper overlay can leak into root discovery");
-	assert(swift.includes("AgentCursor.animate(resource:"), "native grounded actions do not drive a resource-scoped agent cursor");
-	assert(agentCursorSwift.includes("resourceCursors: [String: AgentCursor]"), "agent cursor remains a process-wide singleton");
+	assert(swift.includes("AgentCursor.animate(") && swift.includes("agentId: agentId") && swift.includes("applicationPID: pid"), "native grounded actions do not drive an app-aware agent-scoped cursor");
+	assert(!swift.includes('resource: "\\(agentId):desktop-window:') && agentCursorSwift.includes("agentCursors: [String: AgentCursor]"), "one agent can leave stale cursors behind when switching apps");
 	assert(!agentCursorSwift.includes("AgentCursorRenderer.shared"), "independent resources still share one cursor renderer");
-	assert(!swift.includes("completed.wait()") && !swift.includes("agentCursorLock"), "agent cursor can delay action delivery");
-	assert(agentCursorSwift.includes("paused: !renderer.isAnimating"), "agent cursor timeline continues rendering while idle");
+	assert(swift.includes("presented.wait(timeout: .now() + 0.25)") && !swift.includes("presented.wait()") && !swift.includes("agentCursorLock"), "agent cursor presentation acknowledgement is missing or unbounded");
+	assert(agentCursorSwift.includes("AgentCursorGlyphView") && agentCursorSwift.includes("AgentCursorFrameClock") && agentCursorSwift.includes("window.setFrameOrigin"), "agent cursor lacks a concrete glyph or shared-clock window animation");
+	assert(agentCursorSwift.includes("for cursor in Array(cursors.values)") && !agentCursorSwift.includes("private var animationTimer"), "agent cursors do not share one frame clock");
+	assert(agentCursorMotionSwift.includes("smootherstep") && !agentCursorMotionSwift.includes("Spring"), "agent cursor arrival can still overshoot its target");
+	assert(agentCursorSwift.includes("CGSize(width: 72, height: 72)") && agentCursorSwift.includes("glyphScale: CGFloat = 2"), "agent cursor no longer matches the reference's glyph or halo footprint");
+	assert(agentCursorSwift.includes("viewDidChangeEffectiveAppearance") && agentCursorSwift.includes("bestMatch(from: [.darkAqua, .aqua])"), "agent cursor does not follow macOS appearance changes");
+	assert(agentCursorSwift.includes("let fill = NSColor(srgbRed: 13.0 / 255.0") && agentCursorSwift.includes("let outline = NSColor.white") && agentCursorSwift.includes("let halo = isDark ? NSColor.white : NSColor.black"), "cursor must use a black fill, white outline, and adaptive halo");
+	assert(agentCursorSwift.includes("[(18.0, 0.035), (12.0, 0.055), (7.0, 0.085)]") && agentCursorSwift.includes("shape.lineWidth = 2.5"), "agent cursor no longer matches the reference outline and translucent halo");
+	assert(agentCursorSwift.includes("hasShadow = false") && agentCursorSwift.includes("shape.fill()") && agentCursorSwift.includes("shape.stroke()"), "agent cursor is not a black-filled white-outlined glyph");
+	assert(agentCursorSwift.includes("NSRunningApplication(processIdentifier: applicationPID)") && agentCursorSwift.includes("NSWorkspace.shared.icon(forFile:") && agentCursorSwift.includes("drawApplicationBadge()"), "global agent cursors no longer resolve and draw their target app icon");
+	assert(agentCursorSwift.includes("cache.countLimit = 128") && agentCursorSwift.includes("appBadgeFrame = CGRect(x: 42, y: 41, width: 20, height: 20)"), "agent cursor app-icon caching or approved badge geometry changed");
+	assert(!agentCursorSwift.includes("let badgePath =") && !agentCursorSwift.includes("let shadowFrame ="), "agent app icons regained a synthetic tile or shadow container");
+	assert(agentCursorSwift.includes(".seconds(20)"), "agent cursor can disappear before a bounded successor observation completes");
+	assert(swift.includes("elementLimit = 64_000") && swift.includes("elements.removeValue(forKey: evicted)"), "macOS AX element refs are not bounded for the complete retained-state budget");
+});
+
+check("INV-17 browser and native agent cursors share the filled high-contrast design", () => {
+	assert(cdpTs.includes("const AGENT_CURSOR_SVG"), "CDP cursor does not use the shared reference silhouette");
+	assert(cdpTs.includes('transform="translate(24 23) scale(2)"') && cdpTs.includes('fill="#0d0d0d" stroke="#ffffff" stroke-width="2.5"'), "CDP cursor geometry or colors diverge from the native cursor");
+	assert(cdpTs.includes("matchMedia('(prefers-color-scheme: dark)')"), "CDP cursor does not follow system appearance");
+	assert(cdpTs.includes("drop-shadow(0 0 13px") && cdpTs.includes("20_000"), "CDP cursor halo or lifetime diverges from native");
+	assert(!cdpTs.includes("clipPath: 'polygon") && !cdpTs.includes("background:'hsl("), "legacy filled browser cursor remains");
+});
+
+check("INV-17 managed macOS browser launch stays background-owned", () => {
+	assert(ts.includes('spawn("/usr/bin/open", ["-n", "-g", appBundle'), "managed macOS browser does not use the non-activating workspace launch path");
+	assert(ts.includes("--no-startup-window") && !ts.includes('"--new-window"'), "managed browser startup can create an activating foreground window");
+	assert(ts.includes("closeCdpBrowser(runtimeState.managedBrowserCdpPort)"), "workspace-launched browser is not closed through its owned CDP endpoint");
 });
 
 check("INV-18 consolidated actions and diff-first resulting views", () => {
@@ -386,7 +446,7 @@ async function liveChecks() {
 	try {
 		const socketPath = process.env.PI_CU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Caches/pi-computer-use/bridge.sock");
 		const diagnostics = await call(socketPath, { id: "inv-diagnostics", cmd: "diagnostics" });
-		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 6, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 11, `protocolVersion=${diagnostics.protocolVersion}`));
 		const broadDiscoveryStarted = Date.now();
 		const broadRoots = await call(socketPath, { id: "inv-broad-roots", cmd: "listRoots" }, 10000);
 		const broadDiscoveryMs = Date.now() - broadDiscoveryStarted;
@@ -394,13 +454,13 @@ async function liveChecks() {
 		check("LIVE broad root discovery is bounded and keeps helper alive", () => {
 			assert(Array.isArray(broadRoots?.roots), "broad listRoots did not return roots");
 			assert(broadDiscoveryMs < 10000, `broad listRoots took ${broadDiscoveryMs}ms`);
-			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 6, "helper did not survive broad listRoots");
+			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 11, "helper did not survive broad listRoots");
 		});
 		const abandonedRequestId = `inv-abandoned-roots-${process.pid}-${Date.now()}`;
 		await abandon(socketPath, { id: abandonedRequestId, cmd: "listRoots" });
 		const diagnosticsAfterAbandon = await waitForCompletedRequest(socketPath, abandonedRequestId);
 		check("LIVE abandoned root discovery keeps helper alive", () => {
-			assert(diagnosticsAfterAbandon.protocolVersion === 6, "helper died after writing to an abandoned root-discovery socket");
+			assert(diagnosticsAfterAbandon.protocolVersion === 11, "helper died after writing to an abandoned root-discovery socket");
 		});
 		const explicitWindowId = process.env.PI_CU_LIVE_WINDOW_ID ? Number(process.env.PI_CU_LIVE_WINDOW_ID) : undefined;
 		let windows = [];

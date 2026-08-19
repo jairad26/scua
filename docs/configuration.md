@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration controls browser access, strict accessibility execution, and the macOS agent cursor.
+Configuration controls browser access, execution presentation, strict accessibility execution, and the macOS agent cursor.
 
 ## Files
 
@@ -25,7 +25,8 @@ Example:
   "browser_use": true,
   "managed_browser": "chrome",
   "headless": false,
-  "cursor_overlay": true
+  "cursor_overlay": true,
+  "execution_mode": "background"
 }
 ```
 
@@ -51,7 +52,15 @@ Selects `"helium"` or `"chrome"` for `launch_browser`. The debugging port is alw
 
 Default: `false`
 
-When `true`, actions must remain in the background. Raw pointer events, raw keyboard events, foreground focus fallback, cursor takeover, and the agent cursor overlay are blocked. When `false` (the default), Pi prefers verified semantic activation when it is credible, preserves the focus established by editable clicks for dependent keyboard input, and may retry keyboard input in the foreground when a background attempt conclusively produced no value change. Ambiguous pointer actions are never replayed blindly.
+When `true`, actions must remain in the background. Raw pointer events, raw keyboard events, foreground focus fallback, cursor takeover, and the agent cursor overlay are blocked. This strict policy overrides `execution_mode`.
+
+### `execution_mode`
+
+Default: `"background"`
+
+`"background"` keeps independent application lanes concurrent and uses semantic Accessibility or process-targeted delivery without activating the target when possible. If an action explicitly requires foreground input, or a side-effect-free background attempt is conclusively unsuccessful, SCUA acquires the global attention lease, activates the exact target, and retries safely.
+
+`"foreground"` activates the exact target before each action so the work is visible. Semantic actions still use Accessibility and the independent agent cursor when possible; physical delivery remains a last resort. Because a desktop has only one frontmost application, foreground delivery sections are serialized while observation, cached search, and background work remain concurrent.
 
 ### `cursor_overlay`
 
@@ -72,12 +81,14 @@ PI_COMPUTER_USE_HEADLESS=0
 PI_COMPUTER_USE_HEADLESS=1
 PI_COMPUTER_USE_CURSOR_OVERLAY=0
 PI_COMPUTER_USE_CURSOR_OVERLAY=1
+PI_COMPUTER_USE_EXECUTION_MODE=background
+PI_COMPUTER_USE_EXECUTION_MODE=foreground
 PI_COMPUTER_USE_DELIVERY_POLICY=default
 PI_COMPUTER_USE_DELIVERY_POLICY=foreground
 PI_COMPUTER_USE_CDP_PORT=9222
 ```
 
-`PI_COMPUTER_USE_HEADLESS=1` prohibits foreground fallback. `PI_COMPUTER_USE_DELIVERY_POLICY` is a debugging input; normal policy belongs in configuration rather than individual model calls.
+`PI_COMPUTER_USE_HEADLESS=1` prohibits foreground fallback. `PI_COMPUTER_USE_DELIVERY_POLICY` is a low-level debugging input; normal policy belongs in `execution_mode` rather than individual model calls.
 
 `launch_browser` searches common platform install locations and `PATH`. Use `PI_COMPUTER_USE_CHROME_EXECUTABLE` or `PI_COMPUTER_USE_HELIUM_EXECUTABLE` for an AppImage, portable install, or any non-standard location. An explicit override is authoritative and must name an executable file.
 

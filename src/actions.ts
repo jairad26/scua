@@ -128,3 +128,14 @@ export function outcomeAfterObservedValues(
 	const matches = actions.every((action) => valueForRef(action.ref!) === (action.text ?? ""));
 	return matches ? "worked" : current;
 }
+
+export function outcomeAfterObservedTransition(
+	current: "worked" | "didnt" | "unknown",
+	actions: UiAction[],
+	changedNodeCount: number,
+	rootDeltaCount = 0,
+): "worked" | "didnt" | "unknown" {
+	if (current !== "unknown") return current;
+	if (actions.length === 0 || actions.every((action) => action.action === "moveMouse")) return current;
+	return changedNodeCount > 0 || rootDeltaCount > 0 ? "worked" : current;
+}

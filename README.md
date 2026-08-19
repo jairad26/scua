@@ -18,28 +18,52 @@ element, and action model.
 
 ## Codex tools
 
+- `actor_session`
+- `claim_resource`
+- `open_root`
 - `find_roots`
 - `observe_ui`
 - `search_ui`
 - `expand_ui`
 - `inspect_ui`
 - `act_ui`
+- `execute_plan` (MCP coordinator)
 - `read_text`
 - `wait_for`
 
-SCUA's launcher enables visual agent cursors but disables foreground fallback.
-It may use semantic Accessibility actions or process-targeted background input;
-it must not activate an app, move the physical pointer, or take over the global
-keyboard to rescue a failed action. If a selected application cannot complete
-an action in the background, the action fails honestly.
+SCUA's launcher enables visual agent cursors and defaults to `background`
+execution mode. It uses semantic Accessibility actions or process-targeted
+input without activating an app when possible, then serializes a foreground
+fallback only when the action genuinely requires one. `foreground` mode makes
+every action visible by activating its target first. Strict `headless` mode
+forbids foreground activation and physical input entirely.
 
 Independent application processes and browser-page targets have separate
 scheduling lanes. The macOS helper also maintains a distinct click-through
 cursor overlay per active resource, so concurrent work can remain visible
-without sharing one animated cursor.
+without sharing one animated cursor. Foreground presentation uses one global
+attention lease because an operating-system desktop can only have one
+frontmost app; observation and background actions remain parallel.
+
+External orchestrators can create up to 128 logical actors inside one MCP
+coordinator. Actor identity is a coordinator-issued capability carried in MCP
+request metadata, not a model-invented action field. `claim_resource` provides
+durable acquire, renew, release, and atomic handoff. A handoff fences the old
+owner and forces the recipient to observe a fresh state before acting.
+
+The MCP coordinator also accepts a generic guarded action DAG through
+`execute_plan`. A planner can submit independent branches once instead of
+round-tripping through the model after every click. SCUA runs ready nodes in
+parallel, passes successor states along declared dependencies, checks live UI
+guards immediately before admitting each mutation, and refreshes only a
+conflicting branch within a strict retry budget. It never retries an action
+whose delivery may already have occurred. This remains a lowest-common-
+denominator UI primitive rather than one tool per application.
 
 See [SCUA architecture](docs/scua-architecture.md) for the fork-specific design
-and search decisions.
+and search decisions. The concrete reliability, performance, and
+orchestrator-readiness work is tracked in the [SCUA roadmap](docs/roadmap.md).
+Current macOS evidence is recorded in the [compatibility matrix](docs/compatibility.md).
 
 ## Local development
 
@@ -119,12 +143,16 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 
 ## Main tools
 
+- `actor_session`
+- `claim_resource`
+- `open_root`
 - `find_roots`
 - `observe_ui`
 - `search_ui`
 - `expand_ui`
 - `inspect_ui`
 - `act_ui`
+- `execute_plan` (MCP coordinator)
 - `read_text`
 - `wait_for`
 
@@ -142,7 +170,7 @@ See [docs/usage.md](./docs/usage.md) for the full tool reference.
 
 ## Development status
 
-The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
+The architecture is centered on immutable, state-scoped observations. Desktop surfaces and CDP pages form one multi-root forest; progressive outline queries remain cached, while live work is ordered per physical resource so independent roots can run in parallel. `act_ui` accepts one or more intent steps, preserves focus across dependent input, verifies delivery, recovers safely, stores one complete successor state, and returns a compact diff when identity confidence allows. The MCP-only `execute_plan` composes those same generic transactions into a guarded adaptive DAG; it does not bypass `act_ui` or add application-specific behavior. Older direct tools such as `screenshot`, `click`, `set_text`, and `computer_actions` are no longer part of the public extension surface.
 
 ## License
 
