@@ -100,7 +100,7 @@ function containsLabel(node, query) {
 
 await macosHelper.restart();
 const diagnostics = await macosHelper.diagnosticsCommand();
-assert.equal(diagnostics.protocolVersion, 13);
+assert.equal(diagnostics.protocolVersion, 14);
 
 const client = new McpClient();
 try {

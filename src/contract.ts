@@ -69,7 +69,7 @@ export interface UiCondition {
 }
 
 export interface UiAction {
-	action: "press" | "click" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse";
+	action: "press" | "click" | "select" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "wait";
 	ref?: string;
 	x?: number;
 	y?: number;
@@ -80,6 +80,7 @@ export interface UiAction {
 	path?: Array<{ x: number; y: number } | [number, number]>;
 	button?: MouseButtonName;
 	clickCount?: number;
+	ms?: number;
 }
 
 export interface ActParams extends StateTargetParams {

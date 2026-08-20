@@ -206,6 +206,17 @@ class ControlPlane {
 			actionsUsed: actor.actionsUsed,
 			claims: [...this.claims.values()].filter((claim) => claim.actorId === actor.actorId).map((claim) => ({ ...claim })),
 			recentEvents: this.events.filter((event) => event.actorId === actor.actorId).slice(-100),
+			coordinator: this.diagnostics(),
+		};
+	}
+
+	diagnostics(): Record<string, number> {
+		this.gc();
+		return {
+			liveActors: [...this.actorsById.values()].filter((candidate) => !candidate.closedAt).length,
+			claims: this.claims.size,
+			activeMutations: [...this.activeMutations.values()].reduce((sum, count) => sum + count, 0),
+			retainedEvents: this.events.length,
 		};
 	}
 

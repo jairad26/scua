@@ -17,6 +17,21 @@ export interface ScuaErrorEnvelope {
 export function scuaErrorEnvelope(error: unknown, cancelled = false): ScuaErrorEnvelope {
 	const message = error instanceof Error ? error.message : String(error);
 	const enriched = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+	if (cancelled || /\babort(?:ed|ion)?\b/i.test(message)) {
+		const delivery = enriched?.delivery === "definitely_not_delivered" || enriched?.delivery === "may_have_been_delivered"
+			? enriched.delivery
+			: "may_have_been_delivered";
+		return {
+			code: "cancelled",
+			message,
+			actorId: currentActorId(),
+			resourceKey: typeof enriched?.resourceKey === "string" ? enriched.resourceKey : undefined,
+			retryable: delivery === "definitely_not_delivered",
+			delivery,
+			recovery: delivery === "definitely_not_delivered" ? "reobserve" : "abort",
+			evidence: enriched?.evidence && typeof enriched.evidence === "object" ? enriched.evidence as Record<string, unknown> : undefined,
+		};
+	}
 	if (typeof enriched?.code === "string" && (enriched.delivery === "definitely_not_delivered" || enriched.delivery === "may_have_been_delivered")) {
 		const declaredRecovery = enriched.recovery;
 		return {
@@ -40,9 +55,6 @@ export function scuaErrorEnvelope(error: unknown, cancelled = false): ScuaErrorE
 	}
 	if (error instanceof OwnershipError) {
 		return { code: error.code, message, actorId: error.actorId ?? currentActorId(), resourceKey: error.resourceKey, retryable: error.retryable, delivery: "definitely_not_delivered", recovery: error.recovery };
-	}
-	if (cancelled || /\babort(?:ed|ion)?\b/i.test(message)) {
-		return { code: "cancelled", message, actorId: currentActorId(), retryable: true, delivery: "may_have_been_delivered", recovery: "reobserve" };
 	}
 	if (typeof enriched?.code === "string") {
 		const definitelyNotDelivered = new Set(["foreground_required", "stale_look", "stale_ref", "invalid_args", "coordinate_unavailable", "coordinate_unavailable_for_root", "occluded_target", "root_not_found", "element_ref_invalid"]);

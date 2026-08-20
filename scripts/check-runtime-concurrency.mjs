@@ -75,6 +75,12 @@ const pictureClick = prepareAction({ action: "click", ref: pictureTarget.ref }, 
 assert.equal(pictureClick.needsForeground, true, "picture-only clicks should use foreground pointer delivery");
 const preparedType = prepareAction({ action: "typeText", text: "hello" }, { currentFocus: true }, actionEnv);
 assert.equal(preparedType.usesCurrentFocus, true, "focused typing did not preserve click-established focus");
+const preparedSelect = prepareAction({ action: "select", ref: editor.ref }, { currentFocus: false }, actionEnv);
+assert.equal(preparedSelect.establishesFocus, true, "semantic selection did not establish a focus chain");
+assert.equal(preparedSelect.needsForeground, false, "semantic selection incorrectly required pointer delivery");
+assert("ref" in preparedSelect.target, "semantic selection lost its immutable element grounding");
+const preparedWait = prepareAction({ action: "wait", ms: 100_000 }, { currentFocus: true }, actionEnv);
+assert.equal(preparedWait.params.ms, 60_000, "transaction wait did not enforce its public bound");
 assert.equal(canRetryInForeground(preparedType, "didnt", false), true, "side-effect-free failed typing should retry in the foreground");
 assert.equal(canRetryInForeground(preparedClick, "unknown", false), false, "ambiguous pointer actions must not be replayed");
 assert.equal(outcomeAfterCheck("unknown", "verified"), "worked", "newly verified evidence did not prove the request worked");

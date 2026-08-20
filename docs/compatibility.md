@@ -11,12 +11,12 @@ surface; it is not a permanent allowlist.
 | Managed Chromium fixture | CDP button press, textbox replacement, checkbox press, immutable successor | Yes (`cdp`) | Newly verified semantic postcondition | 0.71–0.74 s/action with an intentional 0.70 s fixture delay |
 | Calculator | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
 | Finder Downloads | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.34 s including successor observation |
-| Finder rename | Semantic filename discovery, background commit rejection, one foreground attention lease, focused HID sequence, external filesystem evaluator | No reliable background commit; foreground attempted | Fail-closed: Finder's draft AX value and key-event window changes are not accepted as a committed rename; external evaluator currently fails | Direct executor probe remains unsupported; no success latency claimed |
-| Calendar | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
-| Notes | Harness available; semantic create/edit compatibility must be rerun after each macOS/helper change | Not claimed by this baseline | Not claimed by this baseline | Pending |
-| Spotify native app | Electron search textbox replacement through generic AX plus PID-targeted keyboard events | Yes (`pid`), without focus transfer | AX value plus resulting search content (`Raga of Madness`) | 2.2 s including fresh observations and result wait; action reported `worked` |
+| Finder rename | Exact CG/AX window pairing, semantic filename discovery, generic semantic selection, one foreground attention lease, focused transient-editor HID sequence, external filesystem evaluator | Selection is AX/background-safe; commit requires foreground Return/text events | Requested successor text plus actual old/new filesystem paths | 0.21 s observation and 4.39 s checked mutation; prior 2.7 s/15 s failures are fixed |
+| Calendar | Quick-event creation, parsed event discovery, and cleanup through generic semantic actions | AX creation plus foreground Return commit | Event appears outside the editor before cleanup; cleanup is checked | 0.22 s observation; included in a four-app 8.75 s parallel run |
+| Notes | Create a temporary note, set its body, verify exact value, and delete it | Yes (`ax`) for create/edit/delete | Exact body value and checked absence after delete | 1.59 s cold bounded observation; 3.83 s edit/delete actions |
+| Spotify native app | Electron search textbox replacement through generic AX/PID events, result discovery outside the input, and clear | Yes (`pid`), without focus transfer | Result content for `Raga of Madness`, not merely an echoed field value | 0.19 s observation; 0.28 s checked search action |
 | Spotify semantic-index torture run | Initial AX slice forced to 100 nodes; a target absent from that slice was discovered by continuation, then every live frontier was exhausted | Observation only | `search_ui` returned the target from a fresh immutable state; final index reported complete | Match at 208 indexed nodes in 0.20 s; complete at 524 nodes, 0 pending frontiers |
-| Second sparse/custom app | Select in the live harness | Not claimed | Not claimed | Pending |
+| App Store custom surface | Search-field value, Return submit, result discovery outside the input, and clear | AX value plus foreground Return commit | `Notion` result appears outside the search field | 0.58 s observation; included in the four-app 8.75 s parallel run |
 
 The native concurrency run used three processes and measured 2.92× overlap.
 The physical pointer moved exactly 0 px, the foreground Chrome PID/window was
@@ -29,6 +29,20 @@ single-coordinator run placed three logical
 actors in one MCP process and one managed browser, measured 2.47× overlap, and
 verified atomic handoff/fresh-observation fencing.
 
+Two real Finder windows were also exercised in parallel. Their semantic reads
+measured 1.58× overlap, while two process-scoped filesystem renames both
+committed correctly in 8.30 s wall time. Black-box MCP cancellation and actor-
+close cancellation both returned `cancelled`; the definitely-undelivered case
+was safe to retry and closing the actor left zero claims.
+
+The 50-logical-actor endurance gate ran for the full 60 minutes with one
+coordinator, 50 owned browser targets, 50 durable claims, and continuous
+five-second checked-mutation rounds. Every sample returned to zero active
+mutations. MCP RSS peaked 39 MB above its initial sample and ended near its
+starting value; file descriptors grew by at most 16. Lifecycle events remained
+bounded at 4,096, the native element-ref count stayed flat at 1,657, and helper
+look retention reached and remained stable at its 512-record limit.
+
 The semantic-index torture run intentionally lowered `SCUA_AX_NODE_LIMIT` to
 100. Spotify retired 184 virtualized Accessibility frontiers while the crawl
 was running; SCUA counted them as stale and completed the remaining currently
@@ -40,7 +54,10 @@ the full tree.
 ```sh
 npm run test:logical-actors-live
 npm run test:multi-agent-live
-node scripts/soak-control-plane.mjs --duration-ms 5000
+npm run test:same-app-windows-live
+npm run test:cancellation-live
+npm run test:real-app-mutations-live
+npm run soak:orchestrator-live
 ```
 
 The first command tests shared-process logical actors, checked browser actions,
@@ -56,6 +73,5 @@ This keeps percentile collection mechanical without turning SQLite or a local
 embedding model into the source of live element identity.
 
 `npm run test:finder-rename-live` is an explicitly mutating, foreground-capable
-external-evaluator probe. It currently fails by design at the filesystem check;
-that failure documents an unsupported commit boundary and prevents the former
-false-positive result from becoming compatibility evidence.
+external-evaluator probe. It passes only when the successor UI and the actual
+filesystem agree that the old name is gone and the new name exists.

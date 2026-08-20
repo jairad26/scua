@@ -99,6 +99,17 @@ final class AXRefStore {
 		defer { lock.unlock() }
 		return snapshots[ref]
 	}
+
+	func retentionCounts() -> [String: Int] {
+		lock.lock()
+		defer { lock.unlock() }
+		return [
+			"windows": windows.count,
+			"windowLimit": windowLimit,
+			"elements": elements.count,
+			"elementLimit": elementLimit,
+		]
+	}
 }
 
 private struct CGWindowCandidate {
@@ -528,7 +539,7 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
-	private let protocolVersion = 13
+	private let protocolVersion = 14
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let physicalUserActivity = PhysicalUserActivityMonitor()
@@ -910,6 +921,9 @@ final class Bridge {
 		let parentPid = Int32(getppid())
 		let parentApp = NSRunningApplication(processIdentifier: parentPid)
 		let parentPath = processPath(pid: parentPid)
+		lookRecordLock.lock()
+		let lookRetention: [String: Int] = ["records": lookRecords.count, "limit": maxLookRecords]
+		lookRecordLock.unlock()
 		var output: [String: Any] = [
 			"protocolVersion": protocolVersion,
 			"architectureVersion": 1,
@@ -922,6 +936,7 @@ final class Bridge {
 			"accessibility": permissions["accessibility"] ?? false,
 			"screenRecording": permissions["screenRecording"] ?? false,
 			"recentCompletedRequestIds": completedRequestIds(),
+			"retention": ["looks": lookRetention, "refs": refStore.retentionCounts()],
 		]
 		if let parentPath {
 			output["parentPath"] = parentPath
@@ -1689,7 +1704,10 @@ final class Bridge {
 	private func buildLookOutline(root: AXUIElement, transform: @escaping (CGRect) -> CGRect, rootChildOffset: Int = 0) -> LookNode {
 		let rootNode = lookNode(element: root, transform: transform, offscreen: false)
 		let configuredNodeLimit = Int(ProcessInfo.processInfo.environment["SCUA_AX_NODE_LIMIT"] ?? "") ?? 1200
-		let configuredWalkMs = Int(ProcessInfo.processInfo.environment["SCUA_AX_WALK_MS"] ?? "") ?? 8000
+		// The first immutable state is a latency-bounded index slice, not a claim
+		// that the entire application tree has been enumerated. Every unfinished
+		// branch is retained as a resumable frontier for search_ui/expand_ui.
+		let configuredWalkMs = Int(ProcessInfo.processInfo.environment["SCUA_AX_WALK_MS"] ?? "") ?? 1500
 		let nodeLimit = max(100, min(5000, configuredNodeLimit))
 		// Slow AX servers must not monopolize an agent lane. Truncation remains
 		// explicit, and expand_ui performs a scoped refresh when deeper context is needed.
@@ -2407,6 +2425,35 @@ final class Bridge {
 			} else {
 				try executeCoordinates(coordinatePoint())
 			}
+		} else if let element, action == "select" {
+			var candidate: AXUIElement? = element
+			var selectedElement: AXUIElement?
+			var depth = 0
+			while let current = candidate, depth < 12 {
+				var settable = DarwinBoolean(false)
+				if AXUIElementIsAttributeSettable(current, kAXSelectedAttribute as CFString, &settable) == .success, settable.boolValue {
+					selectedElement = current
+					break
+				}
+				candidate = parentElement(current)
+				depth += 1
+			}
+			guard let selectedElement else {
+				throw BridgeFailure(message: "No selectable element or ancestor was available", code: "unsupported_action")
+			}
+			let status = AXUIElementSetAttributeValue(selectedElement, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+			if status == .success {
+				var focusedSettable = DarwinBoolean(false)
+				if AXUIElementIsAttributeSettable(selectedElement, kAXFocusedAttribute as CFString, &focusedSettable) == .success, focusedSettable.boolValue {
+					_ = AXUIElementSetAttributeValue(selectedElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				}
+				performed["grounding"] = "description"
+				performed["delivery"] = "ax"
+				performed["selectedAncestorDepth"] = depth
+				let selected = boolAttribute(selectedElement, attribute: kAXSelectedAttribute as CFString) == true
+				return finish(["outcome": selected ? "worked" : "unknown", "performed": performed, "evidence": ["selected": selected]])
+			}
+			return finish(["outcome": "didnt", "performed": performed, "evidence": ["selected": false]])
 		} else if let element, action == "setText" {
 			let text = params["text"] as? String ?? ""
 			if let cursorPoint = try? coordinatePoint() { animateCursor(at: cursorPoint) }
@@ -3005,9 +3052,8 @@ final class Bridge {
 	}
 
 	private func axElements(_ value: AnyObject?) -> [AXUIElement] {
-		if let elements = value as? [AXUIElement] { return elements }
-		if let values = value as? [AnyObject] { return values.compactMap(asAXElement) }
-		return []
+		guard let value else { return [] }
+		return axElements(from: value)
 	}
 
 	private func optionalAXElements(_ value: AnyObject?) -> [AXUIElement]? {
@@ -3303,26 +3349,27 @@ final class Bridge {
 
 	private func axElementArray(_ element: AXUIElement, attribute: CFString) -> [AXUIElement] {
 		guard let value = copyAttribute(element, attribute: attribute) else { return [] }
-		if let array = value as? [AXUIElement] {
-			return array
-		}
-		if let anyArray = value as? [AnyObject] {
-			return anyArray.compactMap(asAXElement)
-		}
-		return []
+		return axElements(from: value)
 	}
 
 	private func axElementArrayIfPresent(_ element: AXUIElement, attribute: CFString) -> [AXUIElement]? {
 		var value: CFTypeRef?
 		let status = AXUIElementCopyAttributeValue(element, attribute, &value)
 		guard status == .success, let value else { return nil }
-		if let array = value as? [AXUIElement] {
-			return array
+		return axElements(from: value as AnyObject)
+	}
+
+	private func axElements(from value: AnyObject) -> [AXUIElement] {
+		let cfValue = value as CFTypeRef
+		guard CFGetTypeID(cfValue) == CFArrayGetTypeID() else { return [] }
+		let array = unsafeBitCast(cfValue, to: CFArray.self)
+		var output: [AXUIElement] = []
+		for index in 0..<CFArrayGetCount(array) {
+			guard let raw = CFArrayGetValueAtIndex(array, index) else { continue }
+			let object = Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue()
+			if let element = asAXElement(object) { output.append(element) }
 		}
-		if let anyArray = value as? [AnyObject] {
-			return anyArray.compactMap(asAXElement)
-		}
-		return []
+		return output
 	}
 
 	private func asAXElement(_ value: AnyObject) -> AXUIElement? {

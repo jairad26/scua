@@ -55,6 +55,7 @@ const action: JsonSchema = {
 		object({ action: { type: "string", const: "press" }, ref: string("Actionable element reference.") }, ["action", "ref"]),
 		object({ action: { type: "string", const: "click" }, ref: string("Element reference."), button: mouseButton, clickCount: number("Click count.", { minimum: 1, maximum: 3 }) }, ["action", "ref"]),
 		object({ action: { type: "string", const: "click" }, ...point, button: mouseButton, clickCount: number("Click count.", { minimum: 1, maximum: 3 }) }, ["action", "x", "y"]),
+		object({ action: { type: "string", const: "select" }, ref: string("Selectable element or descendant reference.") }, ["action", "ref"]),
 		object({ action: { type: "string", const: "setText" }, ref: string("Editable element reference."), text: string("Replacement text.") }, ["action", "ref", "text"]),
 		object({ action: { type: "string", const: "typeText" }, ref: string("Optional editable element reference."), text: string("Text to type.") }, ["action", "text"]),
 		object({ action: { type: "string", const: "keypress" }, ref: string("Optional focused element reference."), keys: { type: "array", items: { type: "string" }, minItems: 1 } }, ["action", "keys"]),
@@ -62,6 +63,7 @@ const action: JsonSchema = {
 		object({ action: { type: "string", const: "drag" }, path: { type: "array", items: object(point, ["x", "y"]), minItems: 2 } }, ["action", "path"]),
 		object({ action: { type: "string", const: "moveMouse" }, ref: string("Element reference whose semantic center should receive the visual agent cursor.") }, ["action", "ref"]),
 		object({ action: { type: "string", const: "moveMouse" }, ...point }, ["action", "x", "y"]),
+		object({ action: { type: "string", const: "wait" }, ms: number("Focus-preserving delay before the next action in the same transaction.", { minimum: 0, maximum: 60_000 }) }, ["action", "ms"]),
 	],
 };
 

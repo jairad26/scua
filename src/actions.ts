@@ -6,9 +6,10 @@ export type ActionTarget = { ref: string } | { x: number; y: number } | { focus:
 
 export type PreparedAction =
 	| { action: "press" | "click"; target: ActionTarget; params: { button?: MouseButtonName; clickCount?: number }; establishesFocus: boolean; usesCurrentFocus: false; needsForeground: boolean }
+	| { action: "select"; target: ActionTarget; params: Record<string, never>; establishesFocus: true; usesCurrentFocus: false; needsForeground: false }
 	| { action: "setText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "typeText"; target: ActionTarget; params: { text: string }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
-	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: false; usesCurrentFocus: boolean; needsForeground: false }
+	| { action: "keypress"; target: ActionTarget; params: { keys: string[] }; establishesFocus: boolean; usesCurrentFocus: boolean; needsForeground: false }
 	| { action: "scroll"; target: ActionTarget; params: { scrollX: number; scrollY: number }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "drag"; target: ActionTarget; params: { path: Array<{ x: number; y: number }> }; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
 	| { action: "moveMouse"; target: ActionTarget; params: Record<string, never>; establishesFocus: false; usesCurrentFocus: false; needsForeground: false }
@@ -89,18 +90,31 @@ function containsEditable(node: OutlineNode): boolean {
 
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
+	if (operation === "wait") {
+		return {
+			action: "wait",
+			params: { ms: Math.max(0, Math.min(60_000, Math.round(toFiniteNumber(action.ms, 0)))) },
+			establishesFocus: false,
+			usesCurrentFocus: false,
+			needsForeground: false,
+		};
+	}
 	const usesCurrentFocus = !env.headless && state.currentFocus && !action.ref && (operation === "typeText" || operation === "keypress");
 	const target = usesCurrentFocus ? focusedTarget(env) : nativeTarget(action, operation, env);
-	const establishesFocus = !env.headless && Boolean(action.ref) && (operation === "click" || operation === "press") && containsEditable(env.node(action.ref!));
+	const establishesFocus = !env.headless
+		&& Boolean(action.ref)
+		&& (operation === "click" || operation === "press" || operation === "keypress" || operation === "select")
+		&& containsEditable(env.node(action.ref!));
 	const targetsEditableRef = Boolean(action.ref) && env.node(action.ref!).isTextInput;
 	const needsForeground = !env.headless && (operation === "click" || operation === "press") && ("x" in target || targetsEditableRef);
 
 	switch (operation) {
 		case "press":
 		case "click": return { action: operation, target, params: { button: mouseButton(action.button), clickCount: clickCount(action.clickCount) }, establishesFocus, usesCurrentFocus: false, needsForeground };
+		case "select": return { action: operation, target, params: {}, establishesFocus: true, usesCurrentFocus: false, needsForeground: false };
 		case "setText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "typeText": return { action: operation, target, params: { text: action.text ?? "" }, establishesFocus: false, usesCurrentFocus, needsForeground: false };
-		case "keypress": return { action: operation, target, params: { keys: keys(action.keys) }, establishesFocus: false, usesCurrentFocus, needsForeground: false };
+		case "keypress": return { action: operation, target, params: { keys: keys(action.keys) }, establishesFocus, usesCurrentFocus, needsForeground: false };
 		case "scroll": return { action: operation, target, params: { scrollX: scrollDelta(action.scrollX), scrollY: scrollDelta(action.scrollY) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "drag": return { action: operation, target, params: { path: path(action.path, env) }, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };
 		case "moveMouse": return { action: operation, target, params: {}, establishesFocus: false, usesCurrentFocus: false, needsForeground: false };

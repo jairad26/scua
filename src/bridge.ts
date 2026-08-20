@@ -334,7 +334,7 @@ const BROWSER_CONTEXT_PREFIX = "browser:";
 const MANAGED_BROWSER_READY_TIMEOUT_MS = 15_000;
 const AUTO_IMAGE_MAX_DIMENSION = 900;
 const EXPLICIT_IMAGE_MAX_DIMENSION = 1_600;
-const BROWSER_TRANSACTION_ACTIONS = new Set<UiAction["action"]>(["press", "click", "setText", "typeText", "keypress", "scroll", "drag", "moveMouse"]);
+const BROWSER_TRANSACTION_ACTIONS = new Set<UiAction["action"]>(["press", "click", "setText", "typeText", "keypress", "scroll", "drag", "moveMouse", "wait"]);
 const SCUA_AGENT_ID = process.env.SCUA_AGENT_ID?.trim() || randomUUID();
 const SEMANTIC_SEARCH_WAIT_MS = Math.max(100, Math.min(10_000, Number(process.env.SCUA_SEMANTIC_SEARCH_WAIT_MS ?? 2_000)));
 
@@ -1631,6 +1631,7 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 		switch (action.action) {
 			case "press":
 			case "click": return { ...base, action: action.action, params: { ...action.params, delivery } };
+			case "select": return { ...base, action: action.action, params: { delivery } };
 			case "setText": return { ...base, action: action.action, params: { text: action.params.text, delivery } };
 			case "typeText": return { ...base, action: action.action, params: { text: action.params.text, delivery } };
 			case "keypress": return { ...base, action: action.action, params: { keys: action.params.keys, delivery } };
@@ -1719,8 +1720,12 @@ async function performListWindows(params: FindParams, signal?: AbortSignal): Pro
 		kind: rawParams.kind,
 	};
 	const config = getComputerUseConfig();
-	const desktopForest = await windowDetailsForFind(query, config, signal);
-	const includeBrowserPages = !query.pid && !query.bundleId && (!query.app || normalizeText(query.app) === "browser") && config.browser_use;
+	const desktopForest = query.kind === "browser_page" ? [] : await windowDetailsForFind(query, config, signal);
+	const includeBrowserPages = (!query.kind || query.kind === "browser_page")
+		&& !query.pid
+		&& !query.bundleId
+		&& (!query.app || normalizeText(query.app) === "browser")
+		&& config.browser_use;
 	const browserForest: ListWindowsDetails["windows"] = !includeBrowserPages ? [] : (await listCdpPageContexts().catch(() => []))
 		.filter((page) => runtimeState.browserOwnerByContext.get(page.contextId) === currentActorId())
 		.map((page) => ({
@@ -2373,7 +2378,10 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 	// Strict-headless batches have one immutable delivery class. When foreground
 	// fallback is permitted, decide independently per action so a completed
 	// background prefix is never replayed as part of a foreground batch.
-	if (headless && currentPlatformBackend.actBatch) {
+	// `wait` is a coordinator-side focus-preserving delay, not a native helper
+	// action. Keep it on the checked sequential path instead of casting it into
+	// a platform batch request that cannot represent it.
+	if (headless && currentPlatformBackend.actBatch && !actions.some((action) => action.action === "wait")) {
 		const actionState: ActionState = { currentFocus: false };
 		const requests = actions.map((action) => helperActRequest(target, prepareUiAction(action, actionState, look, true) as NativePreparedAction, "ax_only"));
 		const textLength = actions.reduce((sum, action) => sum + (action.text?.length ?? 0), 0);
@@ -2401,7 +2409,9 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		return await withForegroundAttention(target, async () => {
 			const steps: ExecutionTrace[] = [];
 			for (const prepared of planned) {
-				const step = await helperAct(target, prepared as NativePreparedAction, false, signal, true);
+				const step = prepared.action === "wait"
+					? (await sleep(prepared.params.ms, signal), executionTrace("wait", "stealth", { outcome: "worked" }))
+					: await helperAct(target, prepared as NativePreparedAction, false, signal, true);
 				steps.push(step);
 				if (step.outcome === "didnt") break;
 			}
@@ -2695,6 +2705,10 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 		const deliverActions = async () => {
 			for (const { action, target } of prepared) {
 				try {
+					if (action.action === "wait") {
+						await sleep(Math.max(0, Math.min(60_000, Math.round(action.ms ?? 0))), signal);
+						continue;
+					}
 					const delivered = await cdpPerformActionDetailedForContext(contextId, visualAgentId(), action, target?.backendNodeId);
 					if (!delivered?.worked) throw new Error("CDP could not deliver the action to its target.");
 					const cursorVisuals = ((execution.evidence as Record<string, unknown>).cursorVisuals as CdpCursorEvidence[] | undefined) ?? [];
@@ -2792,7 +2806,7 @@ function validateActionTarget(action: UiAction): void {
 	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if (action.action === "press" && !hasRef) throw new Error("press requires an actionable ref.");
+	if ((action.action === "press" || action.action === "select") && !hasRef) throw new Error(`${action.action} requires an actionable ref.`);
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");
 }

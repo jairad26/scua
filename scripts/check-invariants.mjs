@@ -50,6 +50,11 @@ check("INV-1 static src lookCompat absent", () => {
 	}
 });
 
+check("INV-1 explicit root-kind discovery stays backend-isolated", () => {
+	assert(ts.includes('query.kind === "browser_page" ? [] : await windowDetailsForFind'), "browser-only root discovery still enters native Accessibility");
+	assert(ts.includes('(!query.kind || query.kind === "browser_page")'), "native-only root discovery still enumerates CDP targets");
+});
+
 check("INV-2 static no TS coordinate transforms or capture dimensions", () => {
 	for (const [file, text] of srcFiles) {
 		assert(!/screenPointToCapturePoint|screenFrameToCaptureFrame/.test(text), `coordinate transform appears in src/${file}`);
@@ -339,13 +344,16 @@ check("INV-18 consolidated actions and diff-first resulting views", () => {
 	assert(!fs.existsSync(path.join(root, "src/interaction.ts")), "superseded interaction policy module still exists");
 	assert(!ts.includes("responseMode") && !extension.includes("responseMode"), "alternate confirmation-only action path still exists");
 	assert(ts.includes("currentFocus") && ts.includes('foregroundTrace(false)') && ts.includes('"side_effect_free_didnt"'), "runner does not preserve action focus, honor foreground mode, or recover checked keyboard failures");
+	assert(ts.includes('!actions.some((action) => action.action === "wait")'), "coordinator-only waits can leak into unsupported native headless batches");
 	assert(view.includes("stabilizeRefs") && view.includes("changesBetween"), "resulting-state ref stabilization or change rendering is missing");
 	assert(ts.includes('view: "full" | "diff"') && ts.includes("Changes ("), "agent result does not expose changes-first resulting views");
-	assert(extension.includes("const uiAction = Type.Union") && extension.includes("omit ref from typeText"), "agent action schema is not discriminated or focus-aware");
+	assert(extension.includes("const uiAction = Type.Union") && extension.includes('Type.Literal("select")') && extension.includes('Type.Literal("wait")') && extension.includes("omit ref from typeText"), "agent action schema is not discriminated, complete, or focus-aware");
 	assert(!ts.includes("preserveFocus") && macBackend.includes("preserveFocus") && swift.includes("!preserveFocus"), "native focus continuity leaks through the coordinator or is not enforced by the backend");
 });
 
 check("INV-19 macOS root identity resolution", () => {
+	assert(swift.includes("private func axElements(from value: AnyObject)") && swift.includes("CFArrayGetValueAtIndex"), "AX element arrays are not extracted from their CFArray identity boundary");
+	assert(!swift.includes("value as? [AXUIElement]"), "bridged Swift array casts can collapse distinct AX window identities");
 	assert(swift.includes("let requestedRoot = windowRef.flatMap { refStore.window(for: $0) }"), "look does not resolve native root refs from the window store");
 	assert(swift.includes("else if let requestedRoot, let owner = pidForElement(requestedRoot)"), "look cannot recover the owner pid from a stored native root");
 	assert(!swift.includes("CGWindowListCopyWindowInfo([.optionIncludingWindow]"), "window lookup uses optionIncludingWindow without an above/below selector");
@@ -512,7 +520,7 @@ async function liveChecks() {
 	try {
 		const socketPath = process.env.PI_CU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Caches/pi-computer-use/bridge.sock");
 		const diagnostics = await call(socketPath, { id: "inv-diagnostics", cmd: "diagnostics" });
-		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 13, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 14, `protocolVersion=${diagnostics.protocolVersion}`));
 		const broadDiscoveryStarted = Date.now();
 		const broadRoots = await call(socketPath, { id: "inv-broad-roots", cmd: "listRoots" }, 10000);
 		const broadDiscoveryMs = Date.now() - broadDiscoveryStarted;
@@ -520,13 +528,13 @@ async function liveChecks() {
 		check("LIVE broad root discovery is bounded and keeps helper alive", () => {
 			assert(Array.isArray(broadRoots?.roots), "broad listRoots did not return roots");
 			assert(broadDiscoveryMs < 10000, `broad listRoots took ${broadDiscoveryMs}ms`);
-			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 13, "helper did not survive broad listRoots");
+			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 14, "helper did not survive broad listRoots");
 		});
 		const abandonedRequestId = `inv-abandoned-roots-${process.pid}-${Date.now()}`;
 		await abandon(socketPath, { id: abandonedRequestId, cmd: "listRoots" });
 		const diagnosticsAfterAbandon = await waitForCompletedRequest(socketPath, abandonedRequestId);
 		check("LIVE abandoned root discovery keeps helper alive", () => {
-			assert(diagnosticsAfterAbandon.protocolVersion === 13, "helper died after writing to an abandoned root-discovery socket");
+			assert(diagnosticsAfterAbandon.protocolVersion === 14, "helper died after writing to an abandoned root-discovery socket");
 		});
 		const explicitWindowId = process.env.PI_CU_LIVE_WINDOW_ID ? Number(process.env.PI_CU_LIVE_WINDOW_ID) : undefined;
 		let windows = [];

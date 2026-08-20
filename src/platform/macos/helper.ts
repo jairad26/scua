@@ -10,7 +10,7 @@ import type { PlatformDiagnostics } from "../types.ts";
 import { resolveMacosHelperAppPath } from "./helper-path.mjs";
 
 const COMMAND_TIMEOUT_MS = 15_000;
-const HELPER_PROTOCOL_VERSION = 13;
+const HELPER_PROTOCOL_VERSION = 14;
 const HELPER_SETUP_TIMEOUT_MS = 60_000;
 
 export const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
@@ -306,6 +306,18 @@ export class MacosHelperClient {
 			arch: toOptionalString(result?.arch),
 			accessibility: toBoolean(result?.accessibility),
 			screenRecording: toBoolean(result?.screenRecording),
+			retention: {
+				looks: {
+					records: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.looks?.records, 0))),
+					limit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.looks?.limit, 0))),
+				},
+				refs: {
+					windows: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.windows, 0))),
+					windowLimit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.windowLimit, 0))),
+					elements: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.elements, 0))),
+					elementLimit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.elementLimit, 0))),
+				},
+			},
 		};
 		this.diagnosticsCache = diagnostics;
 		return diagnostics;

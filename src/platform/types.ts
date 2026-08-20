@@ -27,6 +27,10 @@ export interface PlatformDiagnostics {
 	arch?: string;
 	accessibility?: boolean;
 	screenRecording?: boolean;
+	retention?: {
+		looks?: { records: number; limit: number };
+		refs?: { windows: number; windowLimit: number; elements: number; elementLimit: number };
+	};
 }
 
 export interface PlatformReadyState {
@@ -172,6 +176,7 @@ export interface PlatformActRequestBase {
 
 export type PlatformActRequest = PlatformActRequestBase & (
 	| { action: "press" | "click"; params: { button?: PlatformMouseButton; clickCount?: number } & PlatformActDeliveryParam }
+	| { action: "select"; params: PlatformActDeliveryParam }
 	| { action: "setText"; params: { text: string } & PlatformActDeliveryParam }
 	| { action: "typeText"; params: { text: string } & PlatformActDeliveryParam }
 	| { action: "keypress"; params: { keys: string[] } & PlatformActDeliveryParam }
