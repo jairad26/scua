@@ -9,6 +9,13 @@
 import { randomUUID } from "node:crypto";
 import type { UiAction } from "./contract.ts";
 import { parseLookResponse, serializeOutline, type SerializedOutline } from "./outline.ts";
+import {
+	chromeExtensionAvailable,
+	chromeExtensionCdpCommand,
+	chromeExtensionEnsureTab,
+	chromeExtensionListTabs,
+	type ChromeWorkspaceTab,
+} from "./chrome-extension-bridge.ts";
 
 export interface CdpConsoleEntry {
 	level: string;
@@ -20,6 +27,17 @@ export interface CdpPageContext {
 	targetId: string;
 	title: string;
 	url: string;
+	workspace?: ChromeWorkspaceMetadata;
+}
+
+export interface ChromeWorkspaceMetadata {
+	transport: "chrome_extension";
+	workspaceId: string;
+	workspaceName: string;
+	groupId: number;
+	windowId: number;
+	reusedWindow?: boolean;
+	active: boolean;
 }
 
 export interface CdpSnapshotTarget {
@@ -45,6 +63,8 @@ export interface CdpPageSnapshot {
 	diagnostics: {
 		cdp: "connected";
 		targetCount: number;
+		transport: "chrome_extension" | "direct_cdp";
+		workspace?: ChromeWorkspaceMetadata;
 	};
 }
 
@@ -66,18 +86,59 @@ const CDP_CONTEXT_PREFIX = "browser:";
 const NAVIGATE_LOAD_TIMEOUT_MS = 10_000;
 const CONNECT_FAILURE_RETRY_MS = 5_000;
 const CONSOLE_BUFFER_LIMIT = 20;
+const EXTENSION_TARGET_PREFIX = "scua-extension-tab:";
+const SOCKET_OPEN = 1;
+const SOCKET_CLOSED = 3;
 const AGENT_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72" aria-hidden="true"><path d="M0.682965 3.11905 C0.221806 1.70377 1.58003 0.372346 2.9857 0.861234 L10.7142 3.55264 C12.251 4.08807 12.3448 6.22659 10.8607 6.89444 L8.00523 8.17764 L6.53257 11.1269 C5.81241 12.5653 3.71102 12.4084 3.21226 10.8788 L0.682965 3.11905 Z" transform="translate(24 23) scale(2)" fill="#0d0d0d" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
+
+interface CdpSocket {
+	readyState: number;
+	onmessage: ((event: any) => void) | null;
+	onclose: ((event?: any) => void) | null;
+	onerror: ((event?: any) => void) | null;
+	send(raw: string): void;
+	close(): void;
+}
+
+class ExtensionCdpSocket implements CdpSocket {
+	readyState: number = SOCKET_OPEN;
+	onmessage: ((event: any) => void) | null = null;
+	onclose: (() => void) | null = null;
+	onerror: (() => void) | null = null;
+	private readonly tabId: number;
+
+	constructor(tabId: number) {
+		this.tabId = tabId;
+	}
+
+	send(raw: string): void {
+		if (this.readyState !== SOCKET_OPEN) throw new Error("SCUA Chrome extension transport is closed.");
+		let command: { id?: number; method?: string; params?: Record<string, unknown> };
+		try { command = JSON.parse(raw); } catch { throw new Error("Invalid CDP command envelope."); }
+		if (typeof command.id !== "number" || typeof command.method !== "string") throw new Error("Incomplete CDP command envelope.");
+		void chromeExtensionCdpCommand(this.tabId, command.method, command.params ?? {}).then(
+			(result) => this.onmessage?.({ data: JSON.stringify({ id: command.id, result }) }),
+			(error) => this.onmessage?.({ data: JSON.stringify({ id: command.id, error: { message: error instanceof Error ? error.message : String(error) } }) }),
+		);
+	}
+
+	close(): void {
+		if (this.readyState !== SOCKET_OPEN) return;
+		this.readyState = SOCKET_CLOSED;
+		this.onclose?.();
+	}
+}
 
 export class CdpTab {
 	private nextId = 1;
 	private readonly pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>();
 	private consoleBuffer: CdpConsoleEntry[] = [];
 	private loadFired: (() => void) | undefined;
-	private readonly ws: WebSocket;
+	private readonly ws: CdpSocket;
 	readonly targetId: string;
 	public title: string;
 
-	private constructor(ws: WebSocket, targetId: string, title: string) {
+	private constructor(ws: CdpSocket, targetId: string, title: string) {
 		this.ws = ws;
 		this.targetId = targetId;
 		this.title = title;
@@ -115,8 +176,19 @@ export class CdpTab {
 		}
 	}
 
+	static async connectExtension(tabId: number, targetId: string, title: string): Promise<CdpTab> {
+		const socket = new ExtensionCdpSocket(tabId);
+		const tab = new CdpTab(socket, targetId, title);
+		socket.onmessage = (event) => tab.handleMessage(String(event.data));
+		socket.onclose = () => tab.rejectAllPending(new Error("SCUA Chrome extension transport closed."));
+		socket.onerror = () => tab.rejectAllPending(new Error("SCUA Chrome extension transport error."));
+		await tab.send("Runtime.enable");
+		await tab.send("Page.enable");
+		return tab;
+	}
+
 	get isOpen(): boolean {
-		return this.ws.readyState === WebSocket.OPEN;
+		return this.ws.readyState === SOCKET_OPEN;
 	}
 
 	close(): void {
@@ -191,15 +263,34 @@ export class CdpTab {
 	}
 
 	async navigate(url: string): Promise<void> {
+		const marker = randomUUID();
+		await this.evaluate(`globalThis.__scuaNavigationMarker = ${JSON.stringify(marker)}; true`).catch(() => undefined);
 		const loaded = new Promise<void>((resolve) => {
 			this.loadFired = resolve;
 		});
 		try {
-			await this.send("Page.navigate", { url });
+			const navigation = await this.send("Page.navigate", { url }) as { errorText?: string; loaderId?: string };
+			if (navigation?.errorText) throw new Error(`CDP navigation failed: ${navigation.errorText}`);
 			// SPAs and slow pages may never fire load; cap the wait and move on.
-			await Promise.race([loaded, new Promise<void>((resolve) => setTimeout(resolve, NAVIGATE_LOAD_TIMEOUT_MS))]);
+			await Promise.race([
+				loaded,
+				this.waitForNavigation(marker, typeof navigation?.loaderId === "string"),
+				new Promise<void>((resolve) => setTimeout(resolve, NAVIGATE_LOAD_TIMEOUT_MS)),
+			]);
 		} finally {
 			this.loadFired = undefined;
+		}
+	}
+
+	private async waitForNavigation(marker: string, expectsNewDocument: boolean): Promise<void> {
+		const deadline = Date.now() + NAVIGATE_LOAD_TIMEOUT_MS;
+		while (Date.now() < deadline && this.isOpen) {
+			try {
+				const value = await this.evaluate("({ state: document.readyState, marker: globalThis.__scuaNavigationMarker ?? null })") as { state?: string; marker?: string | null };
+				const ready = value?.state === "complete" || value?.state === "interactive";
+				if (ready && (!expectsNewDocument || value?.marker !== marker)) return;
+			} catch {}
+			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 	}
 
@@ -422,6 +513,7 @@ export class CdpTab {
 
 const connectedTabs = new Map<string, CdpTab>();
 const connectingTabs = new Map<string, Promise<CdpTab>>();
+const extensionWorkspaceTabs = new Map<string, ChromeWorkspaceTab>();
 let lastConnectFailureAt = 0;
 
 /** Close session-owned CDP state without affecting the browser process. */
@@ -429,6 +521,7 @@ export function disconnectCdp(): void {
 	for (const tab of connectedTabs.values()) tab.close();
 	connectedTabs.clear();
 	connectingTabs.clear();
+	extensionWorkspaceTabs.clear();
 	lastConnectFailureAt = 0;
 }
 
@@ -519,20 +612,33 @@ interface CdpPageTarget {
 	title: string;
 	url?: string;
 	webSocketDebuggerUrl?: string;
+	extensionTabId?: number;
 }
 
 export async function listCdpPageContexts(): Promise<CdpPageContext[]> {
-	const pages = await cdpPages();
+	const [directPages, extensionPages] = await Promise.all([cdpPages(), chromeExtensionPages()]);
+	const pages = [...extensionPages, ...directPages];
 	return pages.map((page) => ({
 		contextId: cdpContextId(page.id),
 		targetId: page.id,
 		title: page.title,
 		url: page.url ?? "",
+		workspace: page.extensionTabId ? workspaceMetadata(page) : undefined,
 	}));
 }
 
-/** Create a new tab in the currently configured agent-owned Chromium process. */
+/** Create a tab in the existing Chrome SCUA group, falling back to managed Chromium. */
 export async function createCdpPageContext(url: string): Promise<CdpPageContext | undefined> {
+	if (await chromeExtensionAvailable()) {
+		const tab = await chromeExtensionEnsureTab(url);
+		extensionWorkspaceTabs.set(tab.targetId, tab);
+		return { contextId: cdpContextId(tab.targetId), targetId: tab.targetId, title: tab.title, url: tab.url || url, workspace: workspaceMetadata({ id: tab.targetId, type: "page", title: tab.title, url: tab.url, extensionTabId: tab.tabId }) };
+	}
+	return await createManagedCdpPageContext(url);
+}
+
+/** Create a tab only through the configured direct-debugging endpoint. */
+export async function createManagedCdpPageContext(url: string): Promise<CdpPageContext | undefined> {
 	if (!cdpEnabled()) return undefined;
 	const port = process.env.PI_COMPUTER_USE_CDP_PORT;
 	const response = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
@@ -666,7 +772,7 @@ export async function cdpEvaluateForContext(contextId: string, expression: strin
 
 export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageSnapshot | undefined> {
 	const page = await cdpPageForContext(contextId);
-	if (!page?.webSocketDebuggerUrl) return undefined;
+	if (!page) return undefined;
 	return await withCdpContextTab(contextId, async (tab) => {
 		const [textValue, nodes] = await Promise.all([
 			tab.evaluate("document.body ? document.body.innerText : ''").catch(() => ""),
@@ -684,7 +790,12 @@ export async function cdpSnapshotForContext(contextId: string): Promise<CdpPageS
 			text: typeof textValue === "string" ? textValue : String(textValue ?? ""),
 			targets,
 			outline,
-			diagnostics: { cdp: "connected", targetCount: targets.length },
+			diagnostics: {
+				cdp: "connected",
+				targetCount: targets.length,
+				transport: page.extensionTabId ? "chrome_extension" : "direct_cdp",
+				workspace: page.extensionTabId ? workspaceMetadata(page) : undefined,
+			},
 		};
 	});
 }
@@ -707,12 +818,14 @@ export async function cdpWaitForMutationForContext(contextId: string, since: num
 
 async function withCdpContextTab<T>(contextId: string, run: (tab: CdpTab) => Promise<T>): Promise<T | undefined> {
 	const page = await cdpPageForContext(contextId);
-	if (!page?.webSocketDebuggerUrl) return undefined;
+	if (!page || (!page.webSocketDebuggerUrl && !Number.isInteger(page.extensionTabId))) return undefined;
 	let tab = connectedTabs.get(page.id);
 	if (!tab?.isOpen) {
 		let connecting = connectingTabs.get(page.id);
 		if (!connecting) {
-			connecting = CdpTab.connect(page.webSocketDebuggerUrl, page.id, page.title);
+			connecting = Number.isInteger(page.extensionTabId)
+				? CdpTab.connectExtension(page.extensionTabId!, page.id, page.title)
+				: CdpTab.connect(page.webSocketDebuggerUrl!, page.id, page.title);
 			connectingTabs.set(page.id, connecting);
 		}
 		try {
@@ -734,7 +847,7 @@ async function withCdpContextTab<T>(contextId: string, run: (tab: CdpTab) => Pro
 async function cdpPageForContext(contextId: string): Promise<CdpPageTarget | undefined> {
 	if (!contextId.startsWith(CDP_CONTEXT_PREFIX)) return undefined;
 	const targetId = contextId.slice(CDP_CONTEXT_PREFIX.length);
-	const pages = await cdpPages();
+	const pages = targetId.startsWith(EXTENSION_TARGET_PREFIX) ? await chromeExtensionPages() : await cdpPages();
 	const page = pages.find((candidate) => candidate.id === targetId);
 	if (!page) {
 		connectedTabs.get(targetId)?.close();
@@ -754,11 +867,37 @@ async function cdpPages(): Promise<CdpPageTarget[]> {
 	);
 	const liveIds = new Set(pages.map((page) => page.id));
 	for (const [targetId, tab] of connectedTabs) {
+		if (targetId.startsWith(EXTENSION_TARGET_PREFIX)) continue;
 		if (liveIds.has(targetId)) continue;
 		tab.close();
 		connectedTabs.delete(targetId);
 	}
 	return pages;
+}
+
+async function chromeExtensionPages(): Promise<CdpPageTarget[]> {
+	if (!await chromeExtensionAvailable()) return [];
+	const tabs = await chromeExtensionListTabs();
+	return tabs.map((tab) => {
+		const prior = extensionWorkspaceTabs.get(tab.targetId);
+		const current = { ...tab, reusedWindow: prior?.reusedWindow ?? tab.reusedWindow };
+		extensionWorkspaceTabs.set(tab.targetId, current);
+		return { id: tab.targetId, type: "page", title: tab.title, url: tab.url, extensionTabId: tab.tabId };
+	});
+}
+
+function workspaceMetadata(page: CdpPageTarget): ChromeWorkspaceMetadata | undefined {
+	const workspace = extensionWorkspaceTabs.get(page.id);
+	if (!workspace) return undefined;
+	return {
+		transport: "chrome_extension",
+		workspaceId: workspace.workspaceId,
+		workspaceName: workspace.workspaceName,
+		groupId: workspace.groupId,
+		windowId: workspace.windowId,
+		reusedWindow: workspace.reusedWindow,
+		active: workspace.active,
+	};
 }
 
 function cdpContextId(targetId: string): string {

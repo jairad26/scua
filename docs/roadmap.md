@@ -30,6 +30,9 @@ resource isolation, checked mutation, cancellation, handoff, and evidence.
 - Durable native/browser UI subscriptions expose opaque resume cursors,
   bounded overflow, authoritative successor states, cancellation, and
   ownership-fenced terminal events without observation polling.
+- The Chrome companion reuses the existing focused window, creates inactive
+  tabs in one session workspace group, fences debugger commands to owned tabs,
+  supports concurrent actor tabs, and cleans up only its own tabs at shutdown.
 
 ## Release gates
 

@@ -136,7 +136,7 @@ export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"open_root",
 		"Open isolated root",
-		"Create an agent-owned browser-page root at an absolute HTTP(S) URL, or navigate an existing browser-page state. The temporary profile is isolated from the user's normal browser and other SCUA processes.",
+		"Create an agent-owned browser-page root at an absolute HTTP(S) URL, or navigate an existing browser-page state. With the SCUA companion extension, new inactive tabs share one process-scoped group in the user's existing Chrome window; ownership fences exclude unrelated tabs. A separate temporary-profile browser is the fallback.",
 		object({
 			kind: string("Root kind to create or navigate.", { enum: ["browser_page"], default: "browser_page" }),
 			url: string("Absolute HTTP(S) URL."),

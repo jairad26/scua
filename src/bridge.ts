@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionDetailedForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpCursorEvidence, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionDetailedForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, createManagedCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpCursorEvidence, type CdpPageContext, type CdpPageSnapshot } from "./cdp.ts";
+import { chromeExtensionAvailable, chromeExtensionCloseWorkspace } from "./chrome-extension-bridge.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
@@ -199,7 +200,14 @@ interface BrowserObservationDetails {
 	baseStateId?: string;
 	view: "full" | "diff";
 	changes?: OutlineChange[];
-	root: { ref: string; kind: "browser_page"; title: string; url: string };
+	root: {
+		ref: string;
+		kind: "browser_page";
+		title: string;
+		url: string;
+		transport: "chrome_extension" | "direct_cdp";
+		workspace?: CdpPageSnapshot["diagnostics"]["workspace"];
+	};
 	outline: SerializedOutline;
 	renderedOutline: string;
 	execution: ExecutionTrace;
@@ -708,6 +716,7 @@ export async function shutdownComputerUseSession(): Promise<void> {
 	semanticIndexes.clear();
 	await resourceScheduler.close();
 	resourceScheduler = new ResourceScheduler();
+	if (await chromeExtensionAvailable()) await chromeExtensionCloseWorkspace().catch(() => 0);
 	await closeCdpBrowser(runtimeState.managedBrowserCdpPort);
 	disconnectCdp();
 
@@ -1995,7 +2004,14 @@ function browserObservationResult(
 	const transition = base ? changesBetween(restoreOutline(base.outline), currentOutline) : undefined;
 	const useDiff = Boolean(transition && !transition.useFullView);
 	const folded = foldToBudget(currentOutline);
-	const root = { ref: storeBrowserRootRef(browser.contextId), kind: "browser_page" as const, title: browser.title, url: browser.url };
+	const root = {
+		ref: storeBrowserRootRef(browser.contextId),
+		kind: "browser_page" as const,
+		title: browser.title,
+		url: browser.url,
+		transport: browser.diagnostics.transport,
+		workspace: browser.diagnostics.workspace,
+	};
 	const details: BrowserObservationDetails = { tool, kind: "browser_page", stateId: browser.snapshotId, baseStateId: base?.stateId, view: useDiff ? "diff" : "full", changes: useDiff ? transition?.changes : undefined, root, outline: browser.outline, renderedOutline: folded.text, execution, resource: { key: resourceKey, epoch, actorId: currentActorId() } };
 	const viewText = useDiff
 		? `Changes (${transition!.changedNodeCount}, ${base!.stateId} → ${browser.snapshotId}):\n${renderChanges(transition!.changes) || "(no element changes)"}\nUse stateId ${browser.snapshotId} for subsequent actions and queries.`
@@ -3310,23 +3326,28 @@ function macosAppBundleForExecutable(executable: string): string | undefined {
 	return index >= 0 ? executable.slice(0, index + ".app".length) : undefined;
 }
 
-// Side effects: starts a Pi-managed browser process, replaces any previous managed browser,
-// and sets PI_COMPUTER_USE_CDP_PORT for subsequent CDP context discovery.
+async function observeCreatedBrowserPage(page: CdpPageContext): Promise<AgentToolResult<BrowserObservationDetails>> {
+	const resourceKey = `cdp:${page.targetId}`;
+	runtimeState.browserOwnerByContext.set(page.contextId, currentActorId());
+	claimCurrentActorResource(resourceKey);
+	const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
+	if (!scheduled.value) throw new Error("The new browser page could not be observed.");
+	return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+}
+
+// Prefer an extension-owned tab in the user's existing Chrome window. Only
+// when that bridge is unavailable do we start a separate managed process.
 async function performLaunchBrowserUnlocked(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {
 	const browser = getComputerUseConfig().managed_browser;
 	const requestedUrl = trimOrUndefined(params.url);
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
+	const extensionReady = await chromeExtensionAvailable();
+	const existingPage = extensionReady
+		? await createCdpPageContext(url)
+		: await createManagedCdpPageContext(url).catch(() => undefined);
+	if (existingPage) return await observeCreatedBrowserPage(existingPage);
 	if (runtimeState.managedBrowserCdpPort) {
-		const page = await createCdpPageContext(url).catch(() => undefined);
-		if (page) {
-			const resourceKey = `cdp:${page.targetId}`;
-			runtimeState.browserOwnerByContext.set(page.contextId, currentActorId());
-			claimCurrentActorResource(resourceKey);
-			const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
-			if (!scheduled.value) throw new Error("The new managed browser page could not be observed.");
-			return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
-		}
 		await closeCdpBrowser(runtimeState.managedBrowserCdpPort);
 	}
 	const executable = await managedBrowserExecutable(browser);
@@ -3370,14 +3391,9 @@ async function performLaunchBrowserUnlocked(params: LaunchBrowserParams, signal?
 		}
 		throw error;
 	}
-	const page = await createCdpPageContext(url);
+	const page = await createManagedCdpPageContext(url);
 	if (!page) throw new Error("Managed browser launched but could not create its isolated page context.");
-	const resourceKey = `cdp:${page.targetId}`;
-	runtimeState.browserOwnerByContext.set(page.contextId, currentActorId());
-	claimCurrentActorResource(resourceKey);
-	const scheduled = await resourceScheduler.read(resourceKey, async () => await cdpSnapshotForContext(page.contextId));
-	if (!scheduled.value) throw new Error("Managed browser page could not be observed after launch.");
-	return browserObservationResult(scheduled.value, resourceKey, scheduled.epoch, "launch_browser");
+	return await observeCreatedBrowserPage(page);
 }
 
 async function performLaunchBrowser(params: LaunchBrowserParams, signal?: AbortSignal): Promise<AgentToolResult<BrowserObservationDetails>> {

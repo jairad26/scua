@@ -189,6 +189,21 @@ Diff rendering falls back to a full folded view when the root identity changes, 
 
 Browser pages are roots, not a second agent-facing context hierarchy. `launch_browser` returns browser-page `@r` refs; `observe_ui` returns their normal outline and `stateId`. `read_text`, `wait_for`, `act_ui`, `navigate_browser`, and `evaluate_browser` derive the CDP target from that state. Internal CDP target identifiers never need to be copied between public tools.
 
+The preferred Chrome backend is a small Manifest V3 companion plus a local
+native-messaging relay. A SCUA process supplies a random workspace capability;
+the extension creates inactive tabs in one named group in the existing focused
+normal Chrome window. It records only tab IDs it created. Listing, debugger
+attachment, navigation, evaluation, and cleanup all revalidate that the tab is
+owned by the workspace and remains in its group. Multiple browser roots keep
+separate scheduler lanes, while one actor can move between them and hand them
+off through the ordinary resource contract. The extension never exposes a
+broad user-tab listing to SCUA.
+
+This shape is required for current Chrome releases: remote-debugging switches
+cannot attach to the default data directory. When the extension bridge is
+unavailable, SCUA retains the separate temporary-profile CDP browser as a
+portable fallback.
+
 Target connections persist across actions and observations. Browser waits use
 a page-local mutation notification as a wake-up hint, retain a bounded full-AX
 fallback for accessibility-only/canvas/iframe changes, and create one final

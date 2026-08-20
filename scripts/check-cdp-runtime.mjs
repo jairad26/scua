@@ -6,6 +6,8 @@ const commands = [];
 let connections = 0;
 let callFunctionThrows = false;
 let cursorEvaluateThrows = false;
+let navigationMarker = null;
+let navigationPolls = 0;
 
 class FakeWebSocket {
 	static OPEN = 1;
@@ -27,10 +29,21 @@ class FakeWebSocket {
 		if (message.method === "Runtime.evaluate") {
 			const expression = String(message.params?.expression ?? "");
 			if (cursorEvaluateThrows && expression.includes("scua-agent-cursor-")) result = { exceptionDetails: { text: "cursor fixture exception" } };
+			else if (expression.includes("globalThis.__scuaNavigationMarker =")) {
+				const match = expression.match(/globalThis\.__scuaNavigationMarker = ("[^"]+")/);
+				navigationMarker = match ? JSON.parse(match[1]) : "fixture-marker";
+				result = { result: { value: true } };
+			} else if (expression.includes("marker: globalThis.__scuaNavigationMarker")) {
+				navigationPolls += 1;
+				result = { result: { value: { state: "complete", marker: navigationMarker } } };
+			}
 			else {
 				const value = expression.includes("elementFromPoint") ? false : expression.includes("__scuaMutationState") ? 0 : expression.includes("innerText") ? "Fixture text" : true;
 				result = { result: { value } };
 			}
+		} else if (message.method === "Page.navigate") {
+			result = { loaderId: "fixture-loader" };
+			setTimeout(() => { navigationMarker = null; }, 25);
 		} else if (message.method === "Accessibility.getFullAXTree") {
 			result = { nodes: [{ nodeId: "root", role: { value: "document" }, name: { value: "Fixture" }, childIds: [] }] };
 		} else if (message.method === "DOM.resolveNode") {
@@ -55,7 +68,7 @@ globalThis.fetch = async () => ({
 process.env.PI_COMPUTER_USE_CDP_PORT = "9222";
 
 try {
-	const { cdpMutationGenerationForContext, cdpPerformActionDetailedForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
+	const { CdpTab, cdpMutationGenerationForContext, cdpPerformActionDetailedForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
 	const contextId = "browser:target-1";
 	const first = await cdpSnapshotForContext(contextId);
 	const second = await cdpSnapshotForContext(contextId);
@@ -83,6 +96,10 @@ try {
 		/CDP page action threw: fixture exception/,
 		"Runtime.callFunctionOn exceptionDetails were ignored",
 	);
+	const navigationTab = await CdpTab.connect("ws://127.0.0.1:9222/devtools/page/navigation", "navigation", "Navigation fixture");
+	await navigationTab.navigate("https://fixture.invalid/next");
+	assert(navigationPolls > 1, "eventless navigation accepted the old document's readyState");
+	navigationTab.close();
 	disconnectCdp();
 	console.log("CDP runtime checks passed.");
 } finally {

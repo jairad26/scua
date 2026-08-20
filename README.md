@@ -54,6 +54,15 @@ without sharing one animated cursor. Foreground presentation uses one global
 attention lease because an operating-system desktop can only have one
 frontmost app; observation and background actions remain parallel.
 
+Chrome work uses an optional permission-minimal companion extension. It opens
+inactive agent-owned tabs in one `SCUA` group in the user's existing focused
+Chrome window and drives those pages through Chrome's debugger API. Every
+request is fenced by a process-scoped workspace ID; SCUA cannot claim, list, or
+send debugger commands to unrelated user tabs. Multiple actors can work in
+different tabs concurrently, and session shutdown removes only its owned tabs.
+If the companion is absent, `open_root` falls back to a separate temporary
+Chrome profile.
+
 External orchestrators can create up to 128 logical actors inside one MCP
 coordinator. Actor identity is a coordinator-issued capability carried in MCP
 request metadata, not a model-invented action field. `claim_resource` provides
@@ -90,6 +99,17 @@ npm install
 npm test
 ./scripts/run-mcp.sh
 ```
+
+For existing-window Chrome isolation, install the local companion once:
+
+```sh
+npm run install:chrome-extension
+```
+
+Then enable Developer mode at `chrome://extensions`, choose **Load unpacked**,
+and select the printed extension path. Chrome grants the extension debugger,
+tab, tab-group, native-messaging, and storage permissions; review the local
+source in `chrome-extension/` before loading it.
 
 The first install places a stably signed helper at
 `~/Applications/pi-computer-use.app`. macOS requires Accessibility and Screen

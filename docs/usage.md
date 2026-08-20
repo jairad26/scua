@@ -23,7 +23,7 @@ The normal loop is:
 | `subscribe_ui` | Create an actor-owned native/browser change stream from an immutable state. |
 | `read_ui_events` | Long-read bounded events from an opaque cursor and return an authoritative successor state. |
 | `unsubscribe_ui` | Close a subscription and stop its event pump. |
-| `launch_browser` | Start a managed CDP browser and return its observed page state. |
+| `launch_browser` | Open an inactive owned tab in the SCUA Chrome group (or isolated fallback browser) and return its observed page state. |
 | `navigate_browser` | Navigate the browser page owned by a state. |
 | `evaluate_browser` | Evaluate JavaScript in the browser page owned by a state. |
 
@@ -234,7 +234,12 @@ Every model-visible textual result is limited to 48 KiB or 2,000 lines. Oversize
 
 ## Browser use
 
-Browser-specific commands operate only on CDP browser-page states. `launch_browser` chooses the configured browser and debugging port internally and immediately returns an observed state:
+Browser-specific commands operate only on browser-page states. With the SCUA
+Chrome companion installed, `launch_browser` creates an inactive tab in the
+current process's `SCUA` group inside the existing focused Chrome window. It
+does not select the tab or enumerate unrelated tabs. Without the companion it
+chooses the configured isolated browser and debugging port internally. Both
+paths immediately return an observed state:
 
 ```ts
 const launched = launch_browser({ url: "https://example.com" })
@@ -244,6 +249,11 @@ evaluate_browser({ stateId: returnedStateId, expression: "document.title" })
 ```
 
 Browser states use the same outline, action, text, and condition contracts as desktop states. Native browser windows remain ordinary desktop UI; use `observe_ui` and `act_ui` rather than `navigate_browser` or `evaluate_browser` on them.
+
+The returned `root.transport` is `chrome_extension` or `direct_cdp`. Extension
+roots also include `root.workspace` with the workspace, group, and window IDs
+plus whether Chrome reused an existing window and whether the new tab became
+active. Those fields are execution evidence, not action inputs.
 
 ## Parallel calls
 

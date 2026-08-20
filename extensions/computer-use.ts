@@ -186,9 +186,9 @@ const unsubscribeUiTool = defineTool({
 
 const launchBrowserTool = defineTool({
 	name: "launch_browser",
-	label: "Launch Browser Context",
-	description: "Launch the configured Pi-managed CDP browser and return an observed browser-page state.",
-	promptSnippet: "Use for browser work that needs a managed CDP context.",
+	label: "Open Browser Workspace Tab",
+	description: "Open an inactive SCUA-owned tab in its group in the existing Chrome window, with an isolated managed-browser fallback, and return an observed browser-page state.",
+	promptSnippet: "Use for isolated browser work that must not disturb unrelated user tabs.",
 	promptGuidelines: ["Prefer curl through bash when the page is directly fetchable."],
 	parameters: Type.Object({ url: Type.Optional(Type.String({ maxLength: 8192 })) }),
 	execute: executeLaunchBrowser,

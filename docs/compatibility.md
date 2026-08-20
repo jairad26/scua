@@ -9,6 +9,7 @@ surface; it is not a permanent allowlist.
 | Surface | Evidence exercised | Background delivery | Verification | Observed latency |
 |---|---|---|---|---|
 | Managed Chromium fixture | CDP button press, textbox replacement, checkbox press, immutable successor | Yes (`cdp`) | Newly verified semantic postcondition | 0.71–0.74 s/action with an intentional 0.70 s fixture delay |
+| Existing-window Chrome workspace | Four logical actors concurrently created inactive owned tabs in one group, performed four checked mutations, rejected cross-actor state access, handed off one tab, and cleaned up only the workspace | Yes (`chrome.debugger`), selected user tab unchanged | Four distinct resources and one group/window/workspace; 4/4 semantic outcomes verified; old owner fenced and recipient forced to observe fresh state | 0.30 s for four parallel opens; 0.86 s wall for four intentional 0.50 s checked mutations (4.00× overlap); 1.71 s complete test |
 | Calculator | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.33 s including successor observation |
 | Finder Downloads | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.34 s including successor observation |
 | Finder rename | Exact CG/AX window pairing, semantic filename discovery, generic semantic selection, one foreground attention lease, focused transient-editor HID sequence, external filesystem evaluator | Selection is AX/background-safe; commit requires foreground Return/text events | Requested successor text plus actual old/new filesystem paths | 0.21 s observation and 4.39 s checked mutation; prior 2.7 s/15 s failures are fixed |
@@ -55,6 +56,7 @@ the full tree.
 
 ```sh
 npm run test:logical-actors-live
+npm run test:chrome-workspace-live
 npm run test:multi-agent-live
 npm run test:same-app-windows-live
 npm run test:cancellation-live

@@ -111,7 +111,17 @@ If `browser_use` is disabled, enable it in either config file:
 }
 ```
 
-If `launch_browser` cannot find the selected browser, set `PI_COMPUTER_USE_CHROME_EXECUTABLE` or `PI_COMPUTER_USE_HELIUM_EXECUTABLE` to an executable absolute path. A manual Chromium CDP launch needs both `--remote-debugging-port` and a non-default `--user-data-dir`.
+If Chrome work opens a separate window, the companion extension is not
+reachable and SCUA used its isolated fallback. Run
+`npm run install:chrome-extension`, load the printed directory once at
+`chrome://extensions`, and inspect the extension service worker for native-host
+errors. The unpacked extension ID must match the installer output.
+
+If fallback `launch_browser` cannot find the selected browser, set
+`PI_COMPUTER_USE_CHROME_EXECUTABLE` or
+`PI_COMPUTER_USE_HELIUM_EXECUTABLE` to an executable absolute path. A manual
+Chromium CDP launch needs both `--remote-debugging-port` and a non-default
+`--user-data-dir`.
 
 ## Strict accessibility mode blocks an action
 

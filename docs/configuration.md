@@ -48,7 +48,10 @@ Known browser families include Safari, Chrome and Chromium-family browsers, Fire
 
 Default: `"chrome"`
 
-Selects `"helium"` or `"chrome"` for `launch_browser`. The debugging port is always allocated internally and isn't part of the model-facing contract.
+Selects `"helium"` or `"chrome"` for the isolated `launch_browser` fallback.
+When the SCUA Chrome companion is reachable, it takes priority and operates
+owned tabs in the user's existing Chrome window without a remote-debugging
+port.
 
 ### `headless`
 
@@ -125,9 +128,16 @@ PI_COMPUTER_USE_CDP_PORT=9222
 
 ## CDP browser support
 
+The preferred Chrome transport is the SCUA companion extension. Install its
+local files and native host with `npm run install:chrome-extension`, then load
+the printed unpacked-extension path once from `chrome://extensions`. The
+extension uses one group per SCUA process, creates tabs with `active: false`,
+and rejects commands for tabs outside that workspace. Set
+`SCUA_CHROME_WORKSPACE_NAME` to change the group label.
+
 `PI_COMPUTER_USE_CDP_PORT` enables Chrome DevTools Protocol support for Chromium-family browsers. Launch the browser with `--remote-debugging-port=<port>` and set this variable to the same port.
 
-Use a dedicated, non-default profile with `--user-data-dir=<directory>`. Chrome 136 and later ignore remote-debugging switches for the default data directory as a security measure. `launch_browser` already creates a temporary, separate CDP profile and binds discovery to a randomly allocated loopback port.
+Use a dedicated, non-default profile with `--user-data-dir=<directory>`. Chrome 136 and later ignore remote-debugging switches for the default data directory as a security measure. The fallback `launch_browser` path creates a temporary, separate CDP profile and binds discovery to a randomly allocated loopback port.
 
 When CDP is active, discovered pages participate in the same root and state system as desktop UI. `launch_browser` configures CDP automatically and returns an observed page state. `navigate_browser` and `evaluate_browser` accept only CDP browser-page states; native browser windows continue to use the normal desktop observe/act tools.
 

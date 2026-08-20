@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "SCUA for Chrome",
+  "description": "Keeps SCUA automation inside an owned Chrome tab group.",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArtMhdfY8Vjpk3rO1oUPZn+25rzC5vAIhKugmag5FEWeb42rFvyKXwX7pP9AdE0/r72rRY3PEhXJbjMX7bcKrcYDMAziLFy0U3+qE2jtq7lC/fFLnD/FkkFvZuAwZ8bV9q+NGWQm2A/y4TBhd4D5n05ALq2hHSeA0Y0BVZF8xswHz44JrSMGAyP34VJgIVdaG7cD7qz9S1T2pnpyhdGtqKYz6n7umBOxX4GNgwmZ41DPz6tK9JMTzJz0UrDXZZ14culmfFjlGlcKo3dLebLrAEOgaz+r1BKLx6e2Kiyjd5CF+U3kvO1td3fs3xyLEwKkaDe+OfAvxKlkhYfGWzRG7sQIDAQAB",
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": [
+    "debugger",
+    "nativeMessaging",
+    "storage",
+    "tabGroups",
+    "tabs"
+  ]
+}
