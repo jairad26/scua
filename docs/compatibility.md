@@ -4,7 +4,7 @@ SCUA records compatibility by generic action class, not by adding application-
 specific tools. A row is evidence about an application's Accessibility or CDP
 surface; it is not a permanent allowlist.
 
-## Live baseline — 2026-08-19
+## Live baseline — 2026-08-20
 
 | Surface | Evidence exercised | Background delivery | Verification | Observed latency |
 |---|---|---|---|---|
@@ -17,6 +17,10 @@ surface; it is not a permanent allowlist.
 | Calendar hidden fields | Missing URL textbox returns a structured disclosure candidate; pressing it reveals and writes `url-field` | Disclosure press and AX value write; foreground is needed only for quick-event Return commit | Exact URL value verified in the revealed field | Live regression passed 2026-08-20 |
 | Notes | Create a temporary note, set its body, verify exact value, and delete it | Yes (`ax`) for create/edit/delete | Exact body value and checked absence after delete | 1.59 s cold bounded observation; 3.83 s edit/delete actions |
 | Notion native app | Search-result metadata includes subrole, geometry, role description, and placeholder; exact title search resolves separately from the document body | Observation only in this regression | Distinct title/body refs on a live Notion page | Live regression passed 2026-08-20 |
+| Slack native app | Generic search-field discovery, temporary text replacement, exact-value verification, and clear | Yes (`pid`), without focus transfer | Exact temporary value and exact empty value after cleanup | 0.26 s observation; 1.39 s checked write |
+| Discord native app | Generic custom-web search-field discovery, temporary text replacement, exact-value verification, and clear | Yes (`pid`), without focus transfer | Exact temporary value and exact empty value after cleanup | 0.39 s observation; 7.28 s checked write under five-app contention |
+| Postman native app | Generic collection-search discovery, temporary text replacement, exact-value verification, and clear | Yes (`pid`), without focus transfer | Exact temporary value and exact empty value after cleanup | 0.32 s observation; 1.40 s checked write |
+| Linear native app | Generic workspace-search command, newly exposed textbox discovery, temporary text replacement, and dismissal | Yes (`pid`), without focus transfer | Menu appearance, exact temporary value, and checked menu absence after cleanup | 0.16 s observation; included in the 9.48 s five-app run |
 | Spotify native app | Electron search textbox replacement through generic AX/PID events, result discovery outside the input, and clear | Yes (`pid`), without focus transfer | Result content for `Raga of Madness`, not merely an echoed field value | 0.19 s observation; 0.28 s checked search action |
 | Spotify semantic-index torture run | Initial AX slice forced to 100 nodes; a target absent from that slice was discovered by continuation, then every live frontier was exhausted | Observation only | `search_ui` returned the target from a fresh immutable state; final index reported complete | Match at 208 indexed nodes in 0.20 s; complete at 524 nodes, 0 pending frontiers |
 | App Store custom surface | Search-field value, Return submit, result discovery outside the input, and clear | AX value plus foreground Return commit | `Notion` result appears outside the search field | 0.58 s observation; included in the four-app 8.75 s parallel run |
@@ -33,6 +37,15 @@ helper diagnostics completed in 9 ms without a connection race. A separate
 single-coordinator run placed three logical
 actors in one MCP process and one managed browser, measured 2.47× overlap, and
 verified atomic handoff/fresh-observation fencing.
+
+The Electron/custom-rendered compatibility gate observed Notion and performed
+reversible checked mutations in Slack, Discord, Postman, and Linear
+concurrently. It completed in 9.48 seconds wall time. Every delivered action
+used process-targeted background input, every temporary value was removed, the
+physical pointer moved 0 px, and the foreground PID/window stayed unchanged.
+The gate also exercises empty-string input events, role normalization for
+controls that appear after a command, and postcondition rebinding across
+virtualized successor trees.
 
 Two real Finder windows were also exercised in parallel. Their semantic reads
 measured 1.58× overlap, while two process-scoped filesystem renames both
@@ -64,6 +77,7 @@ npm run test:same-app-windows-live
 npm run test:cancellation-live
 npm run test:subscriptions-live
 npm run test:real-app-mutations-live
+npm run test:electron-compatibility-live
 npm run test:semantic-targets-live
 npm run soak:orchestrator-live
 ```

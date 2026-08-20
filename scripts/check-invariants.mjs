@@ -6,6 +6,7 @@ import path from "node:path";
 import { noteAfterAct, noteFromLook } from "../src/note.ts";
 import { countOutlineNodes, foldToBudget, graftScopedOutline, nodeByRef, parseLookResponse } from "../src/outline.ts";
 import { shouldPreferForegroundModalWindow } from "../src/root-selection.ts";
+import { validateCondition } from "../src/bridge.ts";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const swift = fs.readFileSync(path.join(root, "native/macos/bridge.swift"), "utf8");
@@ -88,6 +89,12 @@ check("INV-4 foreground commit keys fail closed before background dispatch", () 
 	assert(swift.includes('supportsAction(element, action: kAXConfirmAction as CFString)') && swift.includes('code: "foreground_required"'), "commit-capable Enter/Return can be sent through unverified process-targeted delivery");
 	assert(ts.includes("planned.some((action) => action.usesCurrentFocus)") && ts.includes("foregroundReady"), "focus-sensitive action chains do not hold one foreground attention lease");
 	assert(swift.includes('action == "keypress"') && swift.includes('outcome = "unknown"'), "keypress window changes can still masquerade as semantic success");
+});
+
+check("INV-4 exact empty-value postconditions remain representable", () => {
+	const condition = validateCondition({ ref: "@e1", value: "", timeoutMs: 500 });
+	assert(condition.value === "", "empty value was discarded from a checked postcondition");
+	assert(swift.includes('if text.isEmpty') && swift.includes('postKeyPress(keys: ["space"]') && swift.includes('postKeyPress(keys: ["backspace"]'), "Electron empty setText still dispatches a zero-length Unicode key event");
 });
 
 check("INV-8 deleted architecture-v1 identifiers absent", () => {
@@ -264,6 +271,8 @@ check("INV-15 cross-platform semantic roles and web-wrapper AXPress", () => {
 	const outline = fs.readFileSync(path.join(root, "src/outline.ts"), "utf8");
 	assert(outline.includes('["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"]'), "search_ui lacks a cross-platform textbox role alias");
 	assert(outline.includes('["radio", "radiobutton"]'), "search_ui lacks a cross-platform radio role alias");
+	assert(ts.includes('["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"]'), "postconditions lack the cross-platform textbox role alias");
+	assert(swift.includes("normalizedSemanticRole(candidateRole) != normalizedSemanticRole(role)"), "macOS waits do not normalize roles for controls that appear after the base observation");
 	const pressBranch = swift.indexOf('if supportsAction(element, action: kAXPressAction as CFString)');
 	const pointerBranch = swift.indexOf('else if requiresPointerFocus && policy != "ax_only"', pressBranch);
 	assert(pressBranch >= 0 && pointerBranch > pressBranch, "web-wrapper AXPress is rejected before the semantic action is attempted");

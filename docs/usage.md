@@ -47,7 +47,13 @@ expand_ui({ stateId, ref: "@e7", depth: 3 })
 inspect_ui({ stateId, ref: "@e12" })
 ```
 
-`semantic` observation is cheapest, `fused` is the default, and `visual` forces visual text evidence. Search requires at least one of `text`, `role`, or `capability`. It ranks exact, prefix, and substring text before conservative fuzzy matches, returns a fixed top set with the total match count, and asks the caller to refine broad queries. Search can escalate OCR once when the original desktop look omitted it; that refresh is checked against the state's resource epoch.
+`semantic` observation is cheapest, `fused` is the default, and `visual` forces visual text evidence. Search requires at least one of `text`, `role`, or `capability`. It ranks exact, prefix, and substring text before conservative fuzzy matches, returns a fixed top set with the total match count, and asks the caller to refine broad queries. Each returned match includes normalized `capabilities` such as `press`, `focus`, `setValue`, `scroll`, and `textInput`; use these instead of inferring editability from application-specific labels or raw AX action names. Search can escalate OCR once when the original desktop look omitted it; that refresh is checked against the state's resource epoch.
+
+Postconditions accept exact empty-string values, which is useful for reversible
+compatibility probes and cleanup. When Electron or another virtualized surface
+replaces a live control after delivery, SCUA rebinds the expected ref against
+the authoritative successor state before deciding whether the condition
+passed. It does not replay an action that may already have been delivered.
 
 On macOS, a large Accessibility tree is returned quickly as an initial slice and
 then exhausted through background continuations. A cache-miss search waits up

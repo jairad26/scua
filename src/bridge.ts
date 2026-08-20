@@ -16,7 +16,7 @@ import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutp
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ReadUiEventsParams, type RootSelector, type SearchUiParams, type SubscribeUiParams, type UiAction, type UiCondition, type UnsubscribeUiParams, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
-import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
+import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow, PlatformWaitForResponse } from "./platform/types.ts";
 import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler, StaleResourceStateError } from "./runtime.ts";
 import { rebindActParams } from "./rebind.ts";
@@ -2114,14 +2114,14 @@ function conditionScopeRef(params: WaitForParams | NonNullable<ActParams["expect
 	return ref ?? scopeRef;
 }
 
-function validateCondition(params: WaitForParams | NonNullable<ActParams["expect"]>): { text?: string; role?: string; value?: string; scopeRef?: string; scopeExact: boolean; gone: boolean; timeoutMs: number } {
+export function validateCondition(params: WaitForParams | NonNullable<ActParams["expect"]>): { text?: string; role?: string; value?: string; scopeRef?: string; scopeExact: boolean; gone: boolean; timeoutMs: number } {
 	const text = trimOrUndefined(params.text);
 	const role = trimOrUndefined(params.role);
-	const value = trimOrUndefined(params.value);
+	const value = typeof params.value === "string" ? params.value : undefined;
 	const scopeRef = conditionScopeRef(params);
-	if (!text && !role && !value) throw new Error("A UI condition requires text, role, or value.");
-	if (role && !text && !value && !scopeRef) throw new Error("A role-only UI condition requires ref or scopeRef.");
-	if (value && !params.ref) throw new Error("A value UI condition requires an exact ref.");
+	if (!text && !role && value === undefined) throw new Error("A UI condition requires text, role, or value.");
+	if (role && !text && value === undefined && !scopeRef) throw new Error("A role-only UI condition requires ref or scopeRef.");
+	if (value !== undefined && !params.ref) throw new Error("A value UI condition requires an exact ref.");
 	return { text, role, value, scopeRef, scopeExact: Boolean(params.ref), gone: params.until === "absent", timeoutMs: normalizeWaitTimeoutMs(params.timeoutMs) };
 }
 
@@ -2136,8 +2136,22 @@ function nodeWithinScope(node: OutlineNode, scopeRef: string | undefined, scopeE
 	return false;
 }
 
+function nodeHasAncestorRole(node: OutlineNode | undefined, role: string): boolean {
+	let current = node;
+	while (current) {
+		if (current.role === role) return true;
+		current = current.parent;
+	}
+	return false;
+}
+
 function normalizedRole(value: string): string {
-	return value.toLowerCase().replace(/^ax/, "").replace(/[ _-]+/g, "");
+	const normalized = value.toLowerCase().replace(/^ax/, "").replace(/[ _-]+/g, "");
+	if (["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"].includes(normalized)) return "textbox";
+	if (["radio", "radiobutton"].includes(normalized)) return "radio";
+	if (["check", "checkbox"].includes(normalized)) return "checkbox";
+	if (["menuitem", "menuitemradio", "menuitemcheckbox"].includes(normalized)) return "menuitem";
+	return normalized;
 }
 
 function platformRole(outline: Outline, role: string | undefined): string | undefined {
@@ -2147,7 +2161,7 @@ function platformRole(outline: Outline, role: string | undefined): string | unde
 
 function outlineConditionPresent(outline: Outline, condition: ReturnType<typeof validateCondition>): boolean {
 	return searchOutline(outline, condition.text, undefined, undefined, outline.nodes.length)
-		.some((match) => (!condition.role || normalizedRole(match.node.role) === normalizedRole(condition.role)) && nodeWithinScope(match.node, condition.scopeRef, condition.scopeExact) && (!condition.value || normalizeText(match.node.value) === normalizeText(condition.value)));
+		.some((match) => (!condition.role || normalizedRole(match.node.role) === normalizedRole(condition.role)) && nodeWithinScope(match.node, condition.scopeRef, condition.scopeExact) && (condition.value === undefined || normalizeText(match.node.value) === normalizeText(condition.value)));
 }
 
 function conditionScopeNode(outline: Outline, condition: ReturnType<typeof validateCondition>): OutlineNode | undefined {
@@ -2341,13 +2355,14 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 }
 
 function subscriptionCondition(params: SubscribeUiParams): UiCondition | undefined {
-	if (!trimOrUndefined(params.text) && !trimOrUndefined(params.role) && !trimOrUndefined(params.value)) return undefined;
+	const hasValue = typeof params.value === "string";
+	if (!trimOrUndefined(params.text) && !trimOrUndefined(params.role) && !hasValue) return undefined;
 	const condition: UiCondition = {
 		...(trimOrUndefined(params.ref) ? { ref: trimOrUndefined(params.ref) } : {}),
 		...(trimOrUndefined(params.scopeRef) ? { scopeRef: trimOrUndefined(params.scopeRef) } : {}),
 		...(trimOrUndefined(params.text) ? { text: trimOrUndefined(params.text) } : {}),
 		...(trimOrUndefined(params.role) ? { role: trimOrUndefined(params.role) } : {}),
-		...(trimOrUndefined(params.value) ? { value: trimOrUndefined(params.value) } : {}),
+		...(hasValue ? { value: params.value } : {}),
 		until: params.until === "absent" ? "absent" : "present",
 	};
 	validateCondition(condition);
@@ -2639,7 +2654,7 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, ...(single ? { matches: single.matches, revealCandidates: single.revealCandidates, totalMatches: single.totalMatches, returned: single.returned, hasMore: single.hasMore } : { queryResults }), note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
 	const lines = queryResults.flatMap((result, index) => [
 		`query ${result.id ?? index + 1} ${JSON.stringify(result.query)}: ${result.totalMatches} match${result.totalMatches === 1 ? "" : "es"}; returned ${result.returned}`,
-		...result.matches.map((match) => `${match.ref} ${match.role || "Unknown"}${match.subrole ? `/${match.subrole}` : ""} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.rect ? ` at (${Math.round(match.rect.x)},${Math.round(match.rect.y)},${Math.round(match.rect.w)}x${Math.round(match.rect.h)})` : ""}${match.roleDescription ? ` roleDescription=${JSON.stringify(match.roleDescription)}` : ""}${match.placeholder ? ` placeholder=${JSON.stringify(match.placeholder)}` : ""}\n  path: ${match.path}`),
+		...result.matches.map((match) => `${match.ref} ${match.role || "Unknown"}${match.subrole ? `/${match.subrole}` : ""} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.capabilities.length ? ` capabilities=[${match.capabilities.join(",")}]` : ""}${match.rect ? ` at (${Math.round(match.rect.x)},${Math.round(match.rect.y)},${Math.round(match.rect.w)}x${Math.round(match.rect.h)})` : ""}${match.roleDescription ? ` roleDescription=${JSON.stringify(match.roleDescription)}` : ""}${match.placeholder ? ` placeholder=${JSON.stringify(match.placeholder)}` : ""}\n  path: ${match.path}`),
 		...(result.revealCandidates?.length ? [
 			`  no matching control is currently exposed; likely disclosures (press one, then search the successor state):`,
 			...result.revealCandidates.map((match) => `  ${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")}\n    path: ${match.path}`),
@@ -2975,22 +2990,91 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 		};
 		const executedActions = actions.slice(0, execution.actionCount ?? actions.length);
 		try {
+			let verificationCapture: CaptureResult | undefined;
+			const outcomeBeforeVerification = execution.outcome ?? "unknown";
 			if (condition) {
 				const verificationStartedAt = Date.now();
 				const { text: expectedText, role: expectedRole, value: expectedValue, scopeExact, gone, timeoutMs } = condition;
 				const beforePresent = outlineConditionPresent(look.parsedOutline!, condition);
 				const desiredWasPreexisting = beforePresent !== gone;
-				const verification = await currentPlatformBackend.waitFor({
-					...nativeWindowRequest(target),
-					lookId: look.parsedOutline!.lookId,
-					text: expectedText,
-					role: platformRole(look.parsedOutline!, expectedRole),
-					value: expectedValue,
-					scopeRef: scopeNode ? wireRefForNode(scopeNode) : undefined,
-					scopeExact,
-					gone,
-					timeoutMs,
-				}, { signal, timeoutMs: timeoutMs + 2_000 });
+				let verification: PlatformWaitForResponse | undefined = desiredWasPreexisting
+					? { found: true, gone, nodeCount: look.parsedOutline!.nodes.length }
+					: undefined;
+				const exactSetText = scopeExact && expectedValue !== undefined && execution.outcome === "worked"
+					&& executedActions.length > 0
+					&& executedActions.every((action) => action.action === "setText" && action.ref);
+				if (exactSetText && !verification) {
+					let candidate: CaptureResult | undefined;
+					const editedRefs = [...new Set(executedActions.map((action) => action.ref!))];
+					const webWrapped = editedRefs.some((ref) => nodeHasAncestorRole(nodeByRef(baseView.outline, ref), "AXWebArea"));
+					if (!webWrapped) {
+						try {
+							candidate = await captureEditedTargets(target, baseView.outline, editedRefs, signal);
+						} catch {
+							candidate = undefined;
+						}
+					}
+					candidate ??= await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, target, false).catch(() => undefined);
+					if (candidate) {
+						let candidateCondition = condition;
+						let mappings;
+						try {
+							const rebound = rebindActParams({ stateId: baseView.stateId, actions: [], expect: params.expect }, baseView.outline, candidate.outline, candidate.capture.stateId);
+							candidateCondition = validateCondition(rebound.params.expect!);
+							mappings = rebound.mappings;
+						} catch {
+							// Preserve the exact base condition when the target did not re-render.
+						}
+						if (outlineConditionPresent(candidate.outline, candidateCondition) !== candidateCondition.gone) {
+							verification = { found: true, gone: candidateCondition.gone, nodeCount: candidate.outline.nodes.length };
+							verificationCapture = candidate;
+							execution.evidence = { ...execution.evidence, exactValueFastPath: true, ...(mappings ? { postconditionRebound: mappings } : {}) };
+						}
+					}
+				}
+				try {
+					if (verification) {
+						// The authoritative successor already established the exact value.
+					} else {
+					verification = await currentPlatformBackend.waitFor({
+						...nativeWindowRequest(target),
+						lookId: look.parsedOutline!.lookId,
+						text: expectedText,
+						role: platformRole(look.parsedOutline!, expectedRole),
+						value: expectedValue,
+						scopeRef: scopeNode ? wireRefForNode(scopeNode) : undefined,
+						scopeExact,
+						gone,
+						timeoutMs,
+					}, { signal, timeoutMs: timeoutMs + 2_000 });
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					if (!scopeNode || !/scope ref is stale|outside the target root|element_ref_invalid|invalid ui element/i.test(message)) throw error;
+					verificationCapture = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, target, false);
+					const rebound = rebindActParams({ stateId: baseView.stateId, actions: [], expect: params.expect }, baseView.outline, verificationCapture.outline, verificationCapture.capture.stateId);
+					const reboundCondition = validateCondition(rebound.params.expect!);
+					const reboundScope = conditionScopeNode(verificationCapture.outline, reboundCondition);
+					const satisfied = outlineConditionPresent(verificationCapture.outline, reboundCondition) !== reboundCondition.gone;
+					if (satisfied) {
+						verification = { found: true, gone: reboundCondition.gone, nodeCount: verificationCapture.outline.nodes.length };
+					} else {
+						verification = await currentPlatformBackend.waitFor({
+							...nativeWindowRequest(target),
+							lookId: verificationCapture.outline.lookId,
+							text: reboundCondition.text,
+							role: platformRole(verificationCapture.outline, reboundCondition.role),
+							value: reboundCondition.value,
+							scopeRef: reboundScope ? wireRefForNode(reboundScope) : undefined,
+							scopeExact: reboundCondition.scopeExact,
+							gone: reboundCondition.gone,
+							timeoutMs: reboundCondition.timeoutMs,
+						}, { signal, timeoutMs: reboundCondition.timeoutMs + 2_000 });
+						verificationCapture = undefined;
+					}
+					execution.evidence = { ...execution.evidence, postconditionRebound: rebound.mappings };
+				}
+				if (!verification) throw new Error("Postcondition verification returned no result.");
 				execution.verification = {
 					status: verification.found ? (desiredWasPreexisting ? "preexisting" : "verified") : "failed",
 					text: expectedText,
@@ -3015,11 +3099,31 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 				&& executedActions.every((action) => (action.action === "setText" || action.action === "keypress") && action.ref)
 				? [...new Set(executedActions.map((action) => action.ref!))]
 				: undefined;
-			const capture = executedActions.every((action) => action.action === "moveMouse")
+			const capture = verificationCapture ?? (executedActions.every((action) => action.action === "moveMouse")
 				? captureUnchangedCurrentTarget(target)
 				: editedRefs
 					? await captureEditedTargets(target, baseView.outline, editedRefs, signal)
-					: await captureCurrentTargetAuto("act_ui", signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target);
+					: await captureCurrentTargetAuto("act_ui", signal, "auto", AUTO_IMAGE_MAX_DIMENSION, target));
+			if (condition && execution.verification?.status === "failed") {
+				let successorCondition = condition;
+				let mappings;
+				if (scopeNode) {
+					try {
+						const rebound = rebindActParams({ stateId: baseView.stateId, actions: [], expect: params.expect }, baseView.outline, capture.outline, capture.capture.stateId);
+						successorCondition = validateCondition(rebound.params.expect!);
+						mappings = rebound.mappings;
+					} catch {
+						// Keep the failed exact scope when no unique successor exists.
+					}
+				}
+				if (outlineConditionPresent(capture.outline, successorCondition) !== successorCondition.gone) {
+					const desiredWasPreexisting = outlineConditionPresent(baseView.outline, condition) !== condition.gone;
+					execution.verification.status = desiredWasPreexisting ? "preexisting" : "verified";
+					execution.outcome = desiredWasPreexisting ? outcomeBeforeVerification : outcomeAfterCheck(outcomeBeforeVerification, execution.verification.status);
+					if (execution.error?.code === "postcondition_failed") execution.error = undefined;
+					execution.evidence = { ...execution.evidence, postconditionVerifiedFromSuccessor: true, ...(mappings ? { postconditionRebound: mappings } : {}) };
+				}
+			}
 			execution.evidence = { ...execution.evidence, successorObservationMs: Date.now() - successorStartedAt };
 			execution.outcome = outcomeAfterObservedValues(execution.outcome ?? "unknown", executedActions, (ref) => nodeByRef(capture.outline, ref)?.value);
 			const observedTransition = changesBetween(baseView.outline, capture.outline);

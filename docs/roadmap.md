@@ -43,7 +43,7 @@ These are executable product gates rather than duplicate implementation lists.
 | Finder mutation correctness | Distinct CG windows retain distinct AX roots; real rename verified semantically and on disk with generic `select` plus a focused transient-editor chain | `npm run test:finder-rename-live` |
 | Same-app, multiple-window behavior | Finder reads overlap; process-scoped writes both commit under the shared scheduler | `npm run test:same-app-windows-live` |
 | Cancellation | MCP request cancellation and actor-close cancellation are black-box verified; claims return to zero | `npm run test:cancellation-live` |
-| Real-app compatibility | Notes create/edit/delete, Calendar create/verify/cleanup, and Spotify Electron search/result verification | `npm run test:real-app-mutations-live` |
+| Real-app compatibility | Notes and Calendar mutations; Spotify result verification; parallel reversible Notion, Slack, Discord, Postman, and Linear coverage with background-delivery assertions | `npm run test:real-app-mutations-live` and `npm run test:electron-compatibility-live` |
 | Large native trees | Initial AX walk has a 1.5-second latency budget and explicit resumable frontiers; exhaustive search remains available | `npm run test:semantic-index-live` |
 | 50-actor endurance | Full 60-minute run passed with 50 managed targets and claims, continuous five-second mutation rounds, zero residual mutations, 39 MB peak RSS growth, 16 peak descriptor growth, bounded events, and helper look eviction stable at 512/512 | `npm run soak:orchestrator-live` |
 | Durable UI subscriptions | Browser condition delivery, native AX delivery, cursor resume, cancellation, and handoff fencing are black-box verified | `npm run test:subscriptions-live` |
@@ -72,7 +72,8 @@ cursor is not by itself proof that the requested outcome occurred.
    from provisioned OSWorld and MacAgentBench environments; do not substitute
    custom fixtures for those scores.
 2. [Expand the compatibility matrix](https://github.com/jairad26/scua/issues/4)
-   across macOS releases and more custom-rendered/Electron applications,
+   across macOS releases and additional custom-rendered applications beyond
+   the current Notion, Slack, Discord, Postman, Linear, and Spotify gate,
    preserving generic primitives and external outcome checks.
 3. Bring newer generic primitives and equivalent black-box gates to Windows
    and Linux after the macOS product loop is stable.

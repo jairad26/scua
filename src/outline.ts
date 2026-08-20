@@ -102,7 +102,7 @@ export interface OutlineSearchMatch {
 	node: OutlineNode;
 }
 
-export type SerializedOutlineSearchMatch = Omit<OutlineSearchMatch, "node"> & { node?: never };
+export type SerializedOutlineSearchMatch = Omit<OutlineSearchMatch, "node"> & { node?: never; capabilities: string[] };
 
 export interface FoldResult {
 	text: string;
@@ -534,8 +534,18 @@ export function searchOutline(outline: Outline, text?: string, role?: string, ac
 }
 
 export function serializeOutlineSearchMatch(match: OutlineSearchMatch): SerializedOutlineSearchMatch {
-	const { node: _node, ...serialized } = match;
-	return serialized;
+	const { node, ...serialized } = match;
+	const capabilities = [
+		node.canPress ? "press" : undefined,
+		node.canFocus ? "focus" : undefined,
+		node.canSetValue ? "setValue" : undefined,
+		node.canScroll ? "scroll" : undefined,
+		node.canIncrement ? "increment" : undefined,
+		node.canDecrement ? "decrement" : undefined,
+		node.isTextInput ? "textInput" : undefined,
+		node.pictureOnly ? "pictureOnly" : undefined,
+	].filter((value): value is string => Boolean(value));
+	return { ...serialized, capabilities };
 }
 
 export function countOutlineNodes(root: OutlineNode): number {

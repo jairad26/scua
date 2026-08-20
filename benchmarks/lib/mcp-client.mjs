@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 export class ScuaMcpClient {
-	constructor({ root, actorId = `benchmark-evaluator-${process.pid}` }) {
+	constructor({ root, actorId = `benchmark-evaluator-${process.pid}`, env = {} }) {
 		this.root = root;
 		this.nextId = 1;
 		this.buffer = "";
@@ -12,7 +12,7 @@ export class ScuaMcpClient {
 		this.child = spawn(process.execPath, [path.join(root, "mcp/server.ts")], {
 			cwd: root,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...process.env, SCUA_AGENT_ID: actorId },
+			env: { ...process.env, ...env, SCUA_AGENT_ID: actorId },
 		});
 		this.child.stdout.setEncoding("utf8");
 		this.child.stderr.setEncoding("utf8");

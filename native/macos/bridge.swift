@@ -2667,7 +2667,16 @@ final class Bridge {
 					usleep(20_000)
 				}
 				if delivery == "hid" { try assertUserQuietPeriod(request) }
-				try postAtomicUnicodeText(text, pid: pid, delivery: delivery)
+				if text.isEmpty {
+					// A zero-length CGEvent retains virtual key code 0, which Electron
+					// interprets as "a". Dispatch a reversible edit instead so web
+					// wrappers receive real input events and the final value is empty.
+					try postKeyPress(keys: ["space"], pid: pid, delivery: delivery)
+					usleep(12_000)
+					try postKeyPress(keys: ["backspace"], pid: pid, delivery: delivery)
+				} else {
+					try postAtomicUnicodeText(text, pid: pid, delivery: delivery)
+				}
 				usleep(40_000)
 				let verificationElement = refreshElement() ?? targetElement
 				let value = stringAttribute(verificationElement, attribute: kAXValueAttribute as CFString) ?? ""
@@ -2932,6 +2941,20 @@ final class Bridge {
 		return names.map { String(describing: copyAttribute(element, attribute: $0) ?? "" as CFTypeRef) }.joined(separator: "|")
 	}
 
+	private func normalizedSemanticRole(_ value: String) -> String {
+		var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		if normalized.hasPrefix("ax") { normalized.removeFirst(2) }
+		normalized = normalized
+			.replacingOccurrences(of: " ", with: "")
+			.replacingOccurrences(of: "_", with: "")
+			.replacingOccurrences(of: "-", with: "")
+		if ["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"].contains(normalized) { return "textbox" }
+		if ["radio", "radiobutton"].contains(normalized) { return "radio" }
+		if ["check", "checkbox"].contains(normalized) { return "checkbox" }
+		if ["menuitem", "menuitemradio", "menuitemcheckbox"].contains(normalized) { return "menuitem" }
+		return normalized
+	}
+
 	private func axWaitFor(_ request: [String: Any]) throws -> [String: Any] {
 		let pid = Int32(try intArg(request, "pid"))
 		ensureEnhancedAccessibility(pid: pid)
@@ -2940,11 +2963,12 @@ final class Bridge {
 		let role = optionalStringArg(request, "role")?.trimmingCharacters(in: .whitespacesAndNewlines)
 		let text = optionalStringArg(request, "text")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 		let expectedValue = optionalStringArg(request, "value")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		let hasExpectedValue = request["value"] is String
 		let waitForGone = boolArg(request, "gone") ?? false
 		let scopeExact = boolArg(request, "scopeExact") ?? false
 		let timeoutMs = max(100, min(60_000, optionalIntArg(request, "timeoutMs") ?? 10_000))
 		let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
-		guard role?.isEmpty == false || text?.isEmpty == false || expectedValue?.isEmpty == false else {
+		guard role?.isEmpty == false || text?.isEmpty == false || hasExpectedValue else {
 			throw BridgeFailure(message: "axWaitFor requires role, text, or value", code: "invalid_args")
 		}
 		guard let window = windowElement(pid: pid, windowId: windowId, windowRef: windowRef) else {
@@ -2963,17 +2987,18 @@ final class Bridge {
 
 		func matches(_ element: AXUIElement) -> Bool {
 			let candidateRole = self.stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
-			if let role, !role.isEmpty, candidateRole != role { return false }
+			if let role, !role.isEmpty, normalizedSemanticRole(candidateRole) != normalizedSemanticRole(role) { return false }
 			if let text, !text.isEmpty {
 				let subrole = self.stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
 				let haystack = [
 					self.stringAttribute(element, attribute: kAXTitleAttribute as CFString) ?? "",
 					self.stringAttribute(element, attribute: kAXDescriptionAttribute as CFString) ?? "",
+					self.stringAttribute(element, attribute: "AXPlaceholderValue" as CFString) ?? "",
 					self.displayValue(element, role: candidateRole, subrole: subrole),
 				].joined(separator: "\n").lowercased()
 				if !haystack.contains(text) { return false }
 			}
-			if let expectedValue, !expectedValue.isEmpty {
+			if hasExpectedValue, let expectedValue {
 				let subrole = self.stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
 				if self.displayValue(element, role: candidateRole, subrole: subrole).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != expectedValue { return false }
 			}
