@@ -2536,7 +2536,24 @@ final class Bridge {
 			let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"]
 			let requiresPointerFocus = hasAncestorRole(element, role: "AXWebArea") || textRoles.contains(elementRole)
 			var activatedVirtualizedRow = false
-			if action == "press" && elementRole == "AXRow" && hasAncestorRole(element, role: "AXWebArea") && delivery == "pid" {
+			if (action == "press" || action == "click") && elementRole == "AXMenuItem" && hasAncestorRole(element, role: "AXWebArea") {
+				try acquirePhysicalInputIfNeeded()
+				focusTargetForPhysicalInput()
+				let selected = AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success
+				_ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+				if let cursorPoint = try? coordinatePoint() { animateCursor(at: cursorPoint) }
+				if delivery == "hid" { try assertUserQuietPeriod(request) }
+				try postKeyPress(keys: ["return"], pid: pid, delivery: delivery)
+				performed["grounding"] = "focused-menu-keyboard"
+				performed["delivery"] = delivery
+				performed["selectionGrounding"] = selected ? "ax" : "keyboard"
+				usleep(100_000)
+				if stringAttribute(element, attribute: kAXRoleAttribute as CFString) == "AXMenuItem" {
+					performed["retrySafe"] = true
+					return finish(["outcome": "didnt", "performed": performed, "evidence": ["menuItemStillPresent": true]])
+				}
+				activatedVirtualizedRow = true
+			} else if action == "press" && elementRole == "AXRow" && hasAncestorRole(element, role: "AXWebArea") && delivery == "pid" {
 				var candidate: AXUIElement? = element
 				var depth = 0
 				while let current = candidate, depth < 4 {
@@ -2560,19 +2577,26 @@ final class Bridge {
 			if activatedVirtualizedRow {
 				// Outcome remains verification-driven below; the Return event is
 				// delivery evidence, not proof that the intended row opened.
-			} else if supportsAction(element, action: kAXPressAction as CFString) {
+			} else if supportsAction(element, action: kAXPressAction as CFString) || (action == "press" && supportsAction(element, action: "AXShowMenu" as CFString)) {
 				// Electron and web-wrapper apps expose real AXPress actions below an
 				// AXWebArea. Those semantic actions are background-safe and should not
 				// be rejected merely because a pointer fallback would need focus.
+				// AXPress is the primary activation contract. AXShowMenu is a fallback
+				// only for controls which do not advertise AXPress; some Electron popup
+				// buttons expose both but attach different behavior to them.
+				let semanticAction: CFString = supportsAction(element, action: kAXPressAction as CFString)
+					? kAXPressAction as CFString
+					: "AXShowMenu" as CFString
 				let cursorPoint = try? coordinatePoint()
 				if let cursorPoint { animateCursor(at: cursorPoint) }
-				var status = AXUIElementPerformAction(element, kAXPressAction as CFString)
-				if status != .success, let refreshed = refreshElement(), supportsAction(refreshed, action: kAXPressAction as CFString) {
-					status = AXUIElementPerformAction(refreshed, kAXPressAction as CFString)
+				var status = AXUIElementPerformAction(element, semanticAction)
+				if status != .success, let refreshed = refreshElement(), supportsAction(refreshed, action: semanticAction) {
+					status = AXUIElementPerformAction(refreshed, semanticAction)
 				}
 				if status == .success {
 					performed["grounding"] = "description"
 					performed["delivery"] = "ax"
+					performed["semanticAction"] = semanticAction as String
 				} else {
 					try executeCoordinates(coordinatePoint())
 				}

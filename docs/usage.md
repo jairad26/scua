@@ -151,6 +151,14 @@ transaction; it is useful for short native transitions such as an inline
 editor appearing, but it is not a substitute for an observable `expect` or a
 new observation when later actions depend on changed UI meaning.
 
+Any ref-targeted action can instead use a semantic selector. SCUA resolves it
+against the exact immutable state being acted on and fails before delivery if
+the best target remains ambiguous:
+
+```ts
+{ action: "setText", selector: { text: "page title", role: "textbox", capability: "setValue" }, text: "Draft" }
+```
+
 Clicks into editable regions establish foreground focus for later keyboard steps in the same transaction. Omit `ref` from `typeText` or `keypress` after such a click so input is sent to the editor established by that click:
 
 ```ts
@@ -205,12 +213,16 @@ execute_plan({
 
 Ready nodes on independent resource lanes overlap. `stateFrom` consumes the
 successful predecessor's immutable successor state. Every node must provide at
-least one guard that was true in its base state; SCUA checks those guards again
-while holding the resource lease and before advancing its epoch. If the user,
+least one explicit guard that was true in its base state, or use semantic
+selectors for all targets. Selectors are resolved at node execution time and
+the native boundary checks their captured identity. SCUA checks explicit guards
+again while holding the resource lease and before advancing its epoch. If the user,
 application, or another actor changed the relevant UI, no action is admitted.
 Only that definitely-undelivered node may re-observe and retry, at most twice
 by default and within 2.5 seconds. Failed descendants are blocked, unrelated
 branches continue, and any uncertain delivery fails closed without replay.
+Plan nodes default `skipIfExpected` to true, preventing idempotent setup actions
+from creating duplicate UI when their postcondition already holds.
 
 Plans are limited to 64 nodes and 32 concurrently running nodes. They are an
 MCP orchestration primitive, so the direct Pi extension surface remains the

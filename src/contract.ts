@@ -45,6 +45,13 @@ export interface SearchUiQuery {
 	capability?: string;
 }
 
+/** A semantic target resolved against the exact immutable input state at
+ * dispatch time. This lets successor-dependent plans describe controls which
+ * do not exist until a prior node opens a menu, sheet, or editor. */
+export interface UiSelector extends SearchUiQuery {
+	match?: "unique" | "first";
+}
+
 export interface SearchUiParams extends StateTargetParams, SearchUiQuery {
 	queries?: SearchUiQuery[];
 }
@@ -71,6 +78,7 @@ export interface UiCondition {
 export interface UiAction {
 	action: "press" | "click" | "select" | "setText" | "typeText" | "keypress" | "scroll" | "drag" | "moveMouse" | "wait";
 	ref?: string;
+	selector?: UiSelector;
 	x?: number;
 	y?: number;
 	text?: string;
@@ -89,6 +97,8 @@ export interface ActParams extends StateTargetParams {
 	 * epoch advances. A failed guard proves that no action was delivered. */
 	guards?: UiCondition[];
 	expect?: UiCondition;
+	/** Return an unchanged successor without delivery when expect is already true. */
+	skipIfExpected?: boolean;
 }
 
 export interface ActionPlanRetryPolicy {
@@ -106,6 +116,7 @@ export interface ActionPlanNode {
 	actions: UiAction[];
 	guards?: UiCondition[];
 	expect?: UiCondition;
+	skipIfExpected?: boolean;
 	conflictPolicy?: "refresh" | "abort";
 	retry?: ActionPlanRetryPolicy;
 	/** Unknown delivery evidence is fail-closed unless explicitly accepted. */

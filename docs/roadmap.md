@@ -21,6 +21,9 @@ resource isolation, checked mutation, cancellation, handoff, and evidence.
 - Guarded action DAGs overlap independent branches, serialize conflicting
   resources, refresh only definitely-undelivered conflicts, and never replay
   possibly delivered actions.
+- Successor-state semantic selectors support menu-to-editor workflows without
+  guessing future refs; detached Electron documents are pruned, conflicting
+  AX/OCR geometry is explicit, and exact text writes require stable evidence.
 - MCP cancellation and actor-close cancellation propagate through waits,
   actions, plans, and resource cleanup with typed delivery certainty.
 - Native helper transport uses single-flight startup, bounded pre-send retry,
@@ -43,7 +46,7 @@ These are executable product gates rather than duplicate implementation lists.
 | Finder mutation correctness | Distinct CG windows retain distinct AX roots; real rename verified semantically and on disk with generic `select` plus a focused transient-editor chain | `npm run test:finder-rename-live` |
 | Same-app, multiple-window behavior | Finder reads overlap; process-scoped writes both commit under the shared scheduler | `npm run test:same-app-windows-live` |
 | Cancellation | MCP request cancellation and actor-close cancellation are black-box verified; claims return to zero | `npm run test:cancellation-live` |
-| Real-app compatibility | Notes and Calendar mutations; Spotify result verification; parallel reversible Notion, Slack, Discord, Postman, and Linear coverage with background-delivery assertions | `npm run test:real-app-mutations-live` and `npm run test:electron-compatibility-live` |
+| Real-app compatibility | Notes and Calendar mutations; Spotify result verification; parallel reversible Electron coverage; timed Notion create/title/body workflow | `npm run test:real-app-mutations-live`, `npm run test:electron-compatibility-live`, and `npm run test:notion-workflow-live` |
 | Large native trees | Initial AX walk has a 1.5-second latency budget and explicit resumable frontiers; exhaustive search remains available | `npm run test:semantic-index-live` |
 | 50-actor endurance | Full 60-minute run passed with 50 managed targets and claims, continuous five-second mutation rounds, zero residual mutations, 39 MB peak RSS growth, 16 peak descriptor growth, bounded events, and helper look eviction stable at 512/512 | `npm run soak:orchestrator-live` |
 | Durable UI subscriptions | Browser condition delivery, native AX delivery, cursor resume, cancellation, and handoff fencing are black-box verified | `npm run test:subscriptions-live` |

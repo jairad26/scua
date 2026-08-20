@@ -197,7 +197,7 @@ check("INV-10 resource-keyed scheduling", () => {
 check("INV-10 adaptive plans fail closed", () => {
 	const plan = fs.readFileSync(path.join(root, "src/action-plan.ts"), "utf8");
 	const server = fs.readFileSync(path.join(root, "mcp/server.ts"), "utf8");
-	assert(plan.includes("requires at least one live commit guard") && plan.includes('error.delivery === "definitely_not_delivered"') && plan.includes('error.recovery === "reobserve"'), "adaptive plan retries are not guarded and definitely-undelivered only");
+	assert(plan.includes("requires live commit guards, or semantic selectors for every action") && plan.includes('error.delivery === "definitely_not_delivered"') && plan.includes('error.recovery === "reobserve"'), "adaptive plan retries are not guarded and definitely-undelivered only");
 	assert(plan.includes("blockedBy") && plan.includes("Promise.race(running.values())"), "adaptive plan dependency isolation or concurrent scheduling is missing");
 	assert(server.includes("executeAdaptiveActionPlan") && server.includes("failedNodeResult") && server.includes('execute_plan: executePlanTool'), "MCP adaptive-plan routing or uncertain-outcome handling is missing");
 	assert(ts.includes("params.stateId && isBrowserContextId(state.contextId)"), "state-based plan refresh can lose its CDP backend context");
@@ -208,6 +208,7 @@ check("executor recovery and visual acknowledgement stay explicit", () => {
 	assert(ts.includes("automaticStaleRecovery") && ts.includes("rebindActParams"), "one-shot stale target recovery is missing");
 	assert(swift.includes('listen(server, 128)'), "native helper socket backlog is not sized for concurrent workers");
 	assert(swift.includes('"eventDispatch": "keyboard-events"'), "web-backed setText does not expose keyboard event delivery");
+	assert(ts.includes("exactValueStableFastPath") && ts.includes("verificationSamples: 2") && ts.includes("boundedForegroundRecovery"), "web-backed exact values can pass from one transient observation or lack bounded recovery");
 	assert(swift.includes('"overlayPresented"') && swift.includes('"visualAckMs"'), "native cursor overlay acknowledgement evidence is missing");
 	assert(swift.includes("cursorVisualEvidence") && swift.includes('enriched["evidence"] = evidence'), "native cursor acknowledgement is not attached to every cursor-bearing action");
 	assert(agentCursorSwift.includes("static func isVisible(agentId: String)"), "native cursor acknowledgement cannot inspect its agent overlay");

@@ -79,7 +79,13 @@ function validatePlan(params: ExecutePlanParams): { planId: string; nodes: Actio
 		if (byId.has(id)) throw new Error(`Duplicate action-plan node id '${id}'.`);
 		if (!Array.isArray(node.actions) || node.actions.length === 0) throw new Error(`Action-plan node '${id}' has no actions.`);
 		if (node.actions.length > 20) throw new Error(`Action-plan node '${id}' exceeds the 20-action transaction limit.`);
-		if (!Array.isArray(node.guards) || node.guards.length === 0) throw new Error(`Action-plan node '${id}' requires at least one live commit guard.`);
+		const hasExplicitGuards = Array.isArray(node.guards) && node.guards.length > 0;
+		const selectorsGuardEveryTarget = node.actions.every((action, index) => Boolean(action.selector)
+			|| action.action === "wait"
+			|| ((action.action === "keypress" || action.action === "typeText") && !action.ref && index > 0));
+		if (!hasExplicitGuards && !selectorsGuardEveryTarget) {
+			throw new Error(`Action-plan node '${id}' requires live commit guards, or semantic selectors for every action.`);
+		}
 		const hasState = typeof node.stateId === "string" && node.stateId.trim().length > 0;
 		const hasSource = typeof node.stateFrom === "string" && node.stateFrom.trim().length > 0;
 		if (hasState === hasSource) throw new Error(`Action-plan node '${id}' requires exactly one of stateId or stateFrom.`);

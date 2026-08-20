@@ -78,6 +78,13 @@ conflicting branch within a strict retry budget. It never retries an action
 whose delivery may already have occurred. This remains a lowest-common-
 denominator UI primitive rather than one tool per application.
 
+Plan actions may use semantic `selector` targets instead of future `@e` refs.
+Each selector is resolved against that node's exact predecessor state, so a
+single plan can open a menu, target the menu item that appears, and then edit
+the newly created document. Exact `setText` actions infer their own value
+postcondition; Electron values require stable successor evidence, and a
+provably side-effect-free failure receives at most one foreground recovery.
+
 Long-lived orchestrators can replace observation polling with durable UI
 subscriptions. `subscribe_ui` binds a native Accessibility or browser DOM
 notification source to an actor-owned resource and immutable baseline;

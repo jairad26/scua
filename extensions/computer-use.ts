@@ -24,19 +24,33 @@ import { getLoadedComputerUseConfig, loadComputerUseConfig } from "../src/config
 const stateId = Type.String({ description: "Required state id owning every @e ref used by this operation" });
 const point = { x: Type.Number(), y: Type.Number() };
 const mouseButton = Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")]));
+const selector = Type.Object({
+	text: Type.Optional(Type.String({ maxLength: 256 })),
+	role: Type.Optional(Type.String({ maxLength: 128 })),
+	capability: Type.Optional(Type.String({ maxLength: 128 })),
+	match: Type.Optional(Type.Union([Type.Literal("unique"), Type.Literal("first")])),
+});
 const clickByRef = Type.Object({ action: Type.Literal("click"), ref: Type.String(), button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const clickByPoint = Type.Object({ action: Type.Literal("click"), ...point, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) });
 const uiAction = Type.Union([
 	Type.Object({ action: Type.Literal("press"), ref: Type.String({ description: "Actionable outline ref" }) }),
+	Type.Object({ action: Type.Literal("press"), selector }),
 	clickByRef,
+	Type.Object({ action: Type.Literal("click"), selector, button: mouseButton, clickCount: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })) }),
 	clickByPoint,
 	Type.Object({ action: Type.Literal("select"), ref: Type.String({ description: "Selectable element or descendant outline ref" }) }),
+	Type.Object({ action: Type.Literal("select"), selector }),
 	Type.Object({ action: Type.Literal("setText"), ref: Type.String({ description: "Editable outline ref" }), text: Type.String() }),
+	Type.Object({ action: Type.Literal("setText"), selector, text: Type.String() }),
 	Type.Object({ action: Type.Literal("typeText"), ref: Type.Optional(Type.String({ description: "Omit after a click to type into the focus established by that click" })), text: Type.String() }),
+	Type.Object({ action: Type.Literal("typeText"), selector, text: Type.String() }),
 	Type.Object({ action: Type.Literal("keypress"), ref: Type.Optional(Type.String({ description: "Omit to send keys to the focused control" })), keys: Type.Array(Type.String(), { minItems: 1 }) }),
+	Type.Object({ action: Type.Literal("keypress"), selector, keys: Type.Array(Type.String(), { minItems: 1 }) }),
 	Type.Object({ action: Type.Literal("scroll"), ref: Type.Optional(Type.String()), scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
+	Type.Object({ action: Type.Literal("scroll"), selector, scrollX: Type.Optional(Type.Number()), scrollY: Type.Optional(Type.Number()) }),
 	Type.Object({ action: Type.Literal("drag"), path: Type.Array(Type.Object(point), { minItems: 2 }) }),
 	Type.Object({ action: Type.Literal("moveMouse"), ...point }),
+	Type.Object({ action: Type.Literal("moveMouse"), selector }),
 	Type.Object({ action: Type.Literal("wait"), ms: Type.Number({ minimum: 0, maximum: 60_000, description: "Focus-preserving delay inside this transaction" }) }),
 ]);
 
@@ -127,7 +141,7 @@ const actTool = defineTool({
 	description: "Perform one or more precisely targeted checked actions and return the successor state.",
 	promptSnippet: "Pass dependent click/type steps together and use expect for observable completion.",
 	promptGuidelines: ["After clicking or selecting an editable region, omit ref from typeText/keypress so input follows the established focus."],
-	parameters: Type.Object({ stateId, guards: Type.Optional(Type.Array(Type.Object(conditionProperties), { minItems: 1, maxItems: 8 })), expect: Type.Optional(Type.Object(conditionProperties)), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
+	parameters: Type.Object({ stateId, guards: Type.Optional(Type.Array(Type.Object(conditionProperties), { minItems: 1, maxItems: 8 })), expect: Type.Optional(Type.Object(conditionProperties)), skipIfExpected: Type.Optional(Type.Boolean()), actions: Type.Array(uiAction, { minItems: 1, maxItems: 20 }) }),
 	execute: executeAct,
 });
 

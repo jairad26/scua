@@ -106,7 +106,7 @@ export interface PlatformUserActivitySnapshot {
 }
 
 export interface HelperActPerformed {
-	grounding?: "description" | "coordinates" | "keyboard-events";
+	grounding?: "description" | "coordinates" | "keyboard-events" | "focused-menu-keyboard" | "verified-menu-coordinates";
 	/** `ax` means the platform accessibility API (AX on macOS, UIA on Windows). */
 	delivery?: "ax" | NativeInputDelivery;
 	refound?: boolean;
@@ -118,6 +118,8 @@ export interface HelperActPerformed {
 	activated?: boolean;
 	raised?: boolean;
 	focused?: boolean;
+	/** Native preflight proved the failed action left its transient target intact. */
+	retrySafe?: boolean;
 }
 
 export interface PlatformRootDelta {

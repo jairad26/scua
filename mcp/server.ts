@@ -122,6 +122,7 @@ async function executePlanTool(
 					actions: node.actions,
 					guards: node.guards,
 					expect: node.expect,
+					skipIfExpected: node.skipIfExpected ?? true,
 				}, nodeSignal, undefined, ctx) as NestedToolResult;
 				const failure = failedNodeResult(node, result);
 				if (failure) throw failure;

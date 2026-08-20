@@ -11,7 +11,7 @@ import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGeneration
 import { chromeExtensionAvailable, chromeExtensionCloseWorkspace } from "./chrome-extension-bridge.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, revealCandidates, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, pruneDetachedWebAreas, rankedTextMatch, restoreOutline, revealCandidates, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ReadUiEventsParams, type RootSelector, type SearchUiParams, type SubscribeUiParams, type UiAction, type UiCondition, type UnsubscribeUiParams, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -1429,7 +1429,10 @@ async function captureCurrentTarget(signal?: AbortSignal, readText: "auto" | "al
 	let target = targetOverride ?? await resolveCurrentTarget(signal);
 	target = await ensureTargetWindowId(target, signal);
 	const look = await performLook(target, { maxDimension, readText, includeImage }, signal);
-	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, look.parsedOutline!);
+	const parsed = look.parsedOutline!;
+	const prunedDetachedWebAreas = pruneDetachedWebAreas(parsed);
+	if (prunedDetachedWebAreas > 0) look.timings.prunedDetachedWebAreas = prunedDetachedWebAreas;
+	const outline = stabilizeRefs(baseTarget && sameRootIdentity(baseTarget, target) ? baseOutline : undefined, parsed);
 	look.parsedOutline = outline;
 	look.outline = outline.root;
 	const capture = captureForLook(look);
@@ -1801,8 +1804,8 @@ async function helperAct(
 	try {
 		const initialPolicy = headless ? "ax_only" : "background";
 		const result = await deliver(initialPolicy);
-		if (allowForegroundFallback && canRetryInForeground(action, result.outcome, headless)) {
-			return await foregroundTrace(true, "side_effect_free_didnt", { outcome: "didnt", reason: "Background input produced no observable value change; a foreground retry was safe." });
+		if (allowForegroundFallback && (canRetryInForeground(action, result.outcome, headless) || result.outcome === "didnt" && result.performed?.retrySafe)) {
+			return await foregroundTrace(true, "side_effect_free_didnt", { outcome: "didnt", reason: "Background input produced no observable change and native preflight proved the transient target remained intact; one foreground retry was safe." });
 		}
 		const trace = executionTraceFromAct(result, "background");
 		trace.backgroundFirst = true;
@@ -1824,7 +1827,10 @@ function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, 
 		identifier: expectedNode.identifier,
 		roleDescription: expectedNode.roleDescription,
 		placeholder: expectedNode.placeholder,
-		label: outlineNodeLabel(expectedNode),
+		// Native stale-target checks compare the real title/description/value.
+		// roleDescription is presentation metadata (for example "menu item"),
+		// not identity, even when it is the best model-facing fallback label.
+		label: expectedNode.title || expectedNode.description || expectedNode.value || expectedNode.identifier,
 		editable: expectedNode.isTextInput || expectedNode.canSetValue,
 	} : undefined;
 	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy, ...(expectedTarget ? { expectedTarget } : {}), userQuietPeriodMs: policy === "foreground" ? getComputerUseConfig().user_quiet_period_ms : 0 };
@@ -2754,6 +2760,56 @@ function prepareUiAction(action: UiAction, state: ActionState, look: LookRespons
 	});
 }
 
+function inferredSelectorCapability(action: UiAction): string | undefined {
+	if (action.action === "press" || action.action === "click" || action.action === "select") return "press";
+	if (action.action === "setText" || action.action === "typeText") return "setValue";
+	if (action.action === "scroll") return "scroll";
+	return undefined;
+}
+
+function selectorResolutionError(code: "selector_not_found" | "selector_ambiguous", message: string): Error {
+	const error = new Error(message) as Error & { code: string; delivery: string; recovery: string };
+	error.code = code;
+	error.delivery = "definitely_not_delivered";
+	error.recovery = "reobserve";
+	return error;
+}
+
+function resolveUiActionSelectors(actions: UiAction[], outline: Outline): UiAction[] {
+	return actions.map((action) => {
+		if (!action.selector) return action;
+		if (action.ref || Number.isFinite(action.x) || Number.isFinite(action.y)) {
+			throw new Error(`${action.action} cannot combine selector with ref or coordinates.`);
+		}
+		const selector = action.selector;
+		if (!selector.text && !selector.role && !selector.capability) throw new Error(`${action.action}.selector must include text, role, or capability.`);
+		const ranked = searchOutlineRanked(outline, selector.text, selector.role, selector.capability ?? inferredSelectorCapability(action), 2).matches;
+		if (ranked.length === 0) throw selectorResolutionError("selector_not_found", `No current UI element matched the ${action.action} selector; no action was delivered.`);
+		if ((selector.match ?? "unique") === "unique" && ranked.length > 1 && ranked[0].score === ranked[1].score) {
+			const firstArea = (ranked[0].rect?.w ?? 0) * (ranked[0].rect?.h ?? 0);
+			const secondArea = (ranked[1].rect?.w ?? 0) * (ranked[1].rect?.h ?? 0);
+			const geometryDisambiguates = ranked[0].node.focused && !ranked[1].node.focused
+				|| !ranked[0].node.offscreen && ranked[1].node.offscreen
+				|| firstArea > 0 && firstArea >= secondArea * 2;
+			if (!geometryDisambiguates) {
+				throw selectorResolutionError("selector_ambiguous", `The ${action.action} selector matched multiple equally ranked elements; add text, role, or capability to disambiguate. No action was delivered.`);
+			}
+		}
+		const { selector: _selector, ...resolved } = action;
+		const visualRect = ranked[0].visualRect;
+		if ((action.action === "click" || action.action === "press" || action.action === "moveMouse")
+			&& visualRect
+			&& (ranked[0].grounding === "ocr" || ranked[0].grounding === "conflict")) {
+			return {
+				...resolved,
+				x: visualRect.x + visualRect.w / 2,
+				y: visualRect.y + visualRect.h / 2,
+			} as UiAction;
+		}
+		return { ...resolved, ref: ranked[0].ref } as UiAction;
+	});
+}
+
 export function transactionNeedsVerifiedVisualDelivery(actions: UiAction[], look: LookResponse, headless: boolean): boolean {
 	const actionState: ActionState = { currentFocus: false };
 	for (const action of actions) {
@@ -2951,6 +3007,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	state.currentImageMode = "auto";
 	validateStateId(params.stateId);
 	let look = currentLookOrThrow();
+	actions = resolveUiActionSelectors(actions, look.parsedOutline!);
 	const baseView = { stateId: state.currentCapture!.stateId, outline: state.currentOutline! };
 	const target = await ensureTargetWindowId(await resolveCurrentTarget(signal), signal);
 	if (!state.currentTarget || !sameRootIdentity(state.currentTarget, target)) {
@@ -2979,6 +3036,25 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	}
 	const scopeNode = condition ? conditionScopeNode(look.parsedOutline!, condition) : undefined;
 	const noteBefore = state.currentNote;
+	if (params.skipIfExpected && condition && outlineConditionPresent(look.parsedOutline!, condition) !== condition.gone) {
+		const execution = executionTrace("act", "stealth", {
+			outcome: "worked",
+			actionCount: 0,
+			backgroundFirst: true,
+			executionMode: currentExecutionMode(),
+			foregrounded: false,
+			evidence: { skippedDelivery: "postcondition_preexisting" },
+			verification: {
+				status: "preexisting",
+				text: condition.text,
+				role: condition.role,
+				value: condition.value,
+				gone: condition.gone || undefined,
+				timeoutMs: condition.timeoutMs,
+			},
+		});
+		return await buildToolResult("act_ui", "The requested postcondition already held; no action was delivered.", captureUnchangedCurrentTarget(target), execution, signal, "auto", baseView);
+	}
 	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		const deliveryStartedAt = Date.now();
@@ -3003,7 +3079,9 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 				const exactSetText = scopeExact && expectedValue !== undefined && execution.outcome === "worked"
 					&& executedActions.length > 0
 					&& executedActions.every((action) => action.action === "setText" && action.ref);
+				let exactVerificationAttempted = false;
 				if (exactSetText && !verification) {
+					exactVerificationAttempted = true;
 					let candidate: CaptureResult | undefined;
 					const editedRefs = [...new Set(executedActions.map((action) => action.ref!))];
 					const webWrapped = editedRefs.some((ref) => nodeHasAncestorRole(nodeByRef(baseView.outline, ref), "AXWebArea"));
@@ -3025,16 +3103,77 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 						} catch {
 							// Preserve the exact base condition when the target did not re-render.
 						}
-						if (outlineConditionPresent(candidate.outline, candidateCondition) !== candidateCondition.gone) {
-							verification = { found: true, gone: candidateCondition.gone, nodeCount: candidate.outline.nodes.length };
-							verificationCapture = candidate;
-							execution.evidence = { ...execution.evidence, exactValueFastPath: true, ...(mappings ? { postconditionRebound: mappings } : {}) };
+						const firstSampleMatched = outlineConditionPresent(candidate.outline, candidateCondition) !== candidateCondition.gone;
+						if (firstSampleMatched) {
+							// Electron editors can briefly echo AXValue before their controlled
+							// component restores old state. One observation is delivery evidence,
+							// not a durable postcondition.
+							await sleep(250, signal);
+							const stableCandidate = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, target, false).catch(() => undefined);
+							if (stableCandidate) {
+								let stableCondition = condition;
+								let stableMappings;
+								try {
+									const rebound = rebindActParams({ stateId: baseView.stateId, actions: [], expect: params.expect }, baseView.outline, stableCandidate.outline, stableCandidate.capture.stateId);
+									stableCondition = validateCondition(rebound.params.expect!);
+									stableMappings = rebound.mappings;
+								} catch {
+									// Keep the exact condition when the editor retained its identity.
+								}
+								verificationCapture = stableCandidate;
+								if (outlineConditionPresent(stableCandidate.outline, stableCondition) !== stableCondition.gone) {
+									verification = { found: true, gone: stableCondition.gone, nodeCount: stableCandidate.outline.nodes.length };
+									execution.evidence = {
+										...execution.evidence,
+										exactValueStableFastPath: true,
+										verificationSamples: 2,
+										verificationStableMs: 250,
+										...(stableMappings ?? mappings ? { postconditionRebound: stableMappings ?? mappings } : {}),
+									};
+								}
+							}
+						}
+
+						// A failed background setValue may only be replayed when a fresh
+						// snapshot proves the original value is still present. This gives
+						// Electron one bounded foreground recovery without risking a double edit.
+						if (!verification && verificationCapture && !headless && !execution.foregrounded && executedActions.length === 1) {
+							try {
+								const rebound = rebindActParams({ stateId: baseView.stateId, actions: executedActions, expect: params.expect }, baseView.outline, verificationCapture.outline, verificationCapture.capture.stateId);
+								const originalRef = executedActions[0].ref!;
+								const reboundRef = rebound.params.actions[0].ref!;
+								const baseValue = nodeByRef(baseView.outline, originalRef)?.value ?? "";
+								const currentValue = nodeByRef(verificationCapture.outline, reboundRef)?.value ?? "";
+								if (currentValue === baseValue) {
+									const prepared = prepareUiAction(rebound.params.actions[0], { currentFocus: false }, verificationCapture.look, false) as NativePreparedAction;
+									const foregroundTrace = await withForegroundAttention(target, async () => await helperAct(target, prepared, false, signal, true), signal);
+									execution.steps = [...(execution.steps ?? []), foregroundTrace];
+									execution.outcome = foregroundTrace.outcome;
+									execution.foregrounded = true;
+									execution.escalatedToForeground = true;
+									execution.escalationReason = "stable_postcondition_reverted";
+									execution.evidence = { ...execution.evidence, boundedForegroundRecovery: true, backgroundValueAfterAttempt: currentValue };
+									await sleep(250, signal);
+									const recovered = await captureCurrentTarget(signal, "never", AUTO_IMAGE_MAX_DIMENSION, target, false);
+									const recoveredBinding = rebindActParams({ stateId: baseView.stateId, actions: [], expect: params.expect }, baseView.outline, recovered.outline, recovered.capture.stateId);
+									const recoveredCondition = validateCondition(recoveredBinding.params.expect!);
+									verificationCapture = recovered;
+									if (outlineConditionPresent(recovered.outline, recoveredCondition) !== recoveredCondition.gone) {
+										verification = { found: true, gone: recoveredCondition.gone, nodeCount: recovered.outline.nodes.length };
+										execution.evidence = { ...execution.evidence, foregroundRecoveryVerified: true, postconditionRebound: recoveredBinding.mappings };
+									}
+								}
+							} catch {
+								// Fail closed below; never add a second recovery attempt.
+							}
 						}
 					}
 				}
 				try {
 					if (verification) {
 						// The authoritative successor already established the exact value.
+					} else if (exactVerificationAttempted) {
+						verification = { found: false, gone, nodeCount: verificationCapture?.outline.nodes.length ?? look.parsedOutline!.nodes.length };
 					} else {
 					verification = await currentPlatformBackend.waitFor({
 						...nativeWindowRequest(target),
@@ -3168,6 +3307,21 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 	const desiredWasPreexisting = condition
 		? outlineConditionPresent(restoreOutline(baseSnapshot.outline), condition) !== condition.gone
 		: false;
+	if (params.skipIfExpected && condition && desiredWasPreexisting) {
+		const resourceKey = operationState().resourceKey ?? `cdp:${baseSnapshot.targetId}`;
+		const execution = executionTrace("act", "stealth", {
+			delivery: "cdp",
+			deliveryPolicy: "background",
+			executionMode: currentExecutionMode(),
+			foregrounded: false,
+			outcome: "worked",
+			actionCount: 0,
+			backgroundFirst: true,
+			evidence: { skippedDelivery: "postcondition_preexisting", contextId },
+			verification: { status: "preexisting", text: condition.text, role: condition.role, value: condition.value, gone: condition.gone || undefined, timeoutMs: condition.timeoutMs },
+		});
+		return browserObservationResult(baseSnapshot, resourceKey, operationState().epoch ?? resourceScheduler.epoch(resourceKey), "act_ui", baseView, execution);
+	}
 	const prepared = actions.map((action) => {
 		if (!BROWSER_TRANSACTION_ACTIONS.has(action.action)) throw new Error(`Browser transactions do not support '${action.action}'.`);
 		if (action.action === "click" && action.ref && action.button && action.button !== "left") throw new Error("Browser ref clicks support only the left button; use coordinate clicks for right or middle buttons.");
@@ -3292,22 +3446,58 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 
 function validateActionTarget(action: UiAction): void {
 	const hasRef = Boolean(trimOrUndefined(action.ref));
+	const hasSelector = Boolean(action.selector);
 	const hasX = Number.isFinite(action.x);
 	const hasY = Number.isFinite(action.y);
 	if (hasX !== hasY) throw new Error(`${action.action} coordinates require both x and y.`);
 	const hasPoint = hasX && hasY;
-	if ((action.action === "click" || action.action === "moveMouse") && hasRef === hasPoint) {
+	if ((action.action === "click" || action.action === "moveMouse") && Number(hasRef) + Number(hasPoint) + Number(hasSelector) !== 1) {
 		throw new Error(`${action.action} requires exactly one target: ref or x/y coordinates.`);
 	}
-	if ((action.action === "press" || action.action === "select") && !hasRef) throw new Error(`${action.action} requires an actionable ref.`);
+	if (action.action === "press" && !hasRef && !hasSelector && !hasPoint) throw new Error("press requires an actionable ref, selector, or resolved visual point.");
+	if (action.action === "select" && !hasRef && !hasSelector) throw new Error("select requires an actionable ref or selector.");
 	if (action.action === "scroll" && toFiniteNumber(action.scrollX, 0) === 0 && toFiniteNumber(action.scrollY, 0) === 0) throw new Error("scroll requires a non-zero scrollX or scrollY delta.");
 	if (action.clickCount !== undefined && (!Number.isInteger(action.clickCount) || action.clickCount < 1 || action.clickCount > 3)) throw new Error("clickCount must be an integer from 1 to 3.");
 }
 
 async function performAct(params: ActParams, signal?: AbortSignal): Promise<AgentToolResult<ComputerUseDetails | TerminalDesktopActionDetails | BrowserObservationDetails>> {
-	const actions = Array.isArray(params.actions) ? params.actions : [];
+	let actions = Array.isArray(params.actions) ? params.actions : [];
 	if (actions.length === 0) throw new Error("act_ui.actions must contain at least one action.");
 	if (actions.length > 20) throw new Error("act_ui supports at most 20 actions per transaction.");
+	const liveOutline = operationState().currentOutline
+		?? (operationState().browserSnapshot ? restoreOutline(operationState().browserSnapshot!.outline) : undefined);
+	if (actions.some((action) => action.selector)) {
+		if (!liveOutline) throw new Error("Semantic selectors require an observed immutable state.");
+		try {
+			actions = resolveUiActionSelectors(actions, liveOutline);
+		} catch (error) {
+			if (operationState().contextId || !/No current UI element matched/.test(error instanceof Error ? error.message : String(error))) throw error;
+			const needsVisualGrounding = actions.some((action) => action.action === "press" || action.action === "click" || action.action === "moveMouse");
+			let lastError: unknown = error;
+			const delays = needsVisualGrounding ? [0, 100, 200] : [100, 200, 400];
+			for (let attempt = 0; attempt < delays.length; attempt += 1) {
+				if (delays[attempt] > 0) await sleep(delays[attempt], signal);
+				const includeImage = needsVisualGrounding || attempt === delays.length - 1;
+				const refreshed = await captureCurrentTarget(signal, includeImage ? "always" : "never", AUTO_IMAGE_MAX_DIMENSION, undefined, includeImage);
+				try {
+					actions = resolveUiActionSelectors(actions, refreshed.outline);
+					params = { ...params, stateId: refreshed.capture.stateId };
+					lastError = undefined;
+					break;
+				} catch (retryError) {
+					lastError = retryError;
+				}
+			}
+			if (lastError) throw lastError;
+		}
+		params = { ...params, actions };
+	}
+	if (!params.expect && actions.length === 1 && actions[0].action === "setText" && actions[0].ref) {
+		params = {
+			...params,
+			expect: { ref: actions[0].ref, value: actions[0].text ?? "", timeoutMs: 1_500 },
+		};
+	}
 	for (const action of actions) validateActionTarget(action);
 	const baseOutline = operationState().currentOutline
 		? restoreOutline(serializeOutline(operationState().currentOutline!))
@@ -3322,9 +3512,10 @@ async function performAct(params: ActParams, signal?: AbortSignal): Promise<Agen
 	} catch (error) {
 		const enriched = error && typeof error === "object" ? error as { code?: string; delivery?: string } : undefined;
 		const message = error instanceof Error ? error.message : String(error);
+		const definitelyUndeliveredCode = ["guard_failed", "stale_look", "stale_ref", "element_ref_invalid", "stale_state"].includes(enriched?.code ?? "");
 		const recoverable = error instanceof LiveGuardError
 			|| error instanceof StaleResourceStateError
-			|| enriched?.delivery === "definitely_not_delivered" && ["guard_failed", "stale_look", "stale_ref", "element_ref_invalid", "stale_state"].includes(enriched.code ?? "")
+			|| definitelyUndeliveredCode && enriched?.delivery !== "may_have_been_delivered"
 			|| /target root changed after observation|live ui changed after observation/i.test(message);
 		if (!recoverable || !baseOutline) throw error;
 

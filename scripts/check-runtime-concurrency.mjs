@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction } from "../src/actions.ts";
 import { searchMayEscalateToDesktopOcr, transactionNeedsVerifiedVisualDelivery } from "../src/bridge.ts";
-import { graftScopedOutline, nodeByRef, parseLookResponse, revealCandidates, searchOutlineRanked } from "../src/outline.ts";
+import { graftScopedOutline, nodeByRef, parseLookResponse, pruneDetachedWebAreas, revealCandidates, searchOutlineRanked } from "../src/outline.ts";
 import { rebindActParams, TargetRebindError } from "../src/rebind.ts";
 import { ResourceScheduler, StateStore, StaleResourceStateError } from "../src/runtime.ts";
 import { changesBetween, stabilizeRefs } from "../src/view.ts";
@@ -62,6 +62,24 @@ const describedFields = rawLook("described-fields", [
 assert.equal(searchOutlineRanked(describedFields.parsedOutline, "page title", "textbox", "setValue").matches[0]?.node.wireRef, "title-field", "editable role descriptions did not disambiguate title and body controls");
 assert.equal(searchOutlineRanked(describedFields.parsedOutline, "text entry area", "textbox", "setValue").matches[0]?.node.wireRef, "body-field", "editable body semantics were not searchable");
 
+const retainedElectronDocument = rawLook("retained-electron-document", [
+	{ ref: "old-document", role: "AXWebArea", title: "Old page", rect: { x: 799, y: 599, w: 1, h: 1 }, children: [{ ref: "old-title", role: "AXTextArea", roleDescription: "page title", value: "Old page", canSetValue: true }] },
+	{ ref: "current-document", role: "AXWebArea", title: "Current page", rect: { x: 0, y: 40, w: 800, h: 560 }, children: [{ ref: "current-title", role: "AXTextArea", roleDescription: "page title", value: "Current page", canSetValue: true }] },
+]);
+assert.equal(pruneDetachedWebAreas(retainedElectronDocument.parsedOutline), 1, "detached Electron document subtree was not pruned");
+assert.equal(searchOutlineRanked(retainedElectronDocument.parsedOutline, "page title", "textbox", "setValue").matches[0]?.node.wireRef, "current-title", "a retained Electron subtree shadowed the current editor");
+
+const conflictedGeometry = rawLook("conflicted-geometry", [{
+	ref: "menu-surface",
+	role: "AXWebArea",
+	title: "Create new",
+	rect: { x: 280, y: 680, w: 224, h: 42 },
+	text: [{ string: "Page", confidence: 0.99, rect: { x: 615, y: 420, w: 380, h: 44 } }],
+}]);
+const groundedPage = searchOutlineRanked(conflictedGeometry.parsedOutline, "Page").matches[0];
+assert.equal(groundedPage.grounding, "conflict", "conflicting AX/OCR geometry was not surfaced");
+assert.deepEqual(groundedPage.visualRect, { x: 615, y: 420, w: 380, h: 44 }, "matching OCR geometry was not preserved");
+
 const hiddenControlLook = rawLook("hidden-control", [
 	{ ref: "save", role: "AXButton", title: "Save", canPress: true },
 	{ ref: "disclosure", role: "AXButton", title: "Add Notes, URL, or Attachments", canPress: true },
@@ -110,6 +128,8 @@ assert("ref" in preparedSelect.target, "semantic selection lost its immutable el
 const preparedWait = prepareAction({ action: "wait", ms: 100_000 }, { currentFocus: true }, actionEnv);
 assert.equal(preparedWait.params.ms, 60_000, "transaction wait did not enforce its public bound");
 assert.equal(canRetryInForeground(preparedType, "didnt", false), true, "side-effect-free failed typing should retry in the foreground");
+const preparedSetText = prepareAction({ action: "setText", ref: editor.ref, text: "hello" }, { currentFocus: false }, actionEnv);
+assert.equal(canRetryInForeground(preparedSetText, "didnt", false), true, "side-effect-free failed semantic setText should retry in the foreground");
 assert.equal(canRetryInForeground(preparedClick, "unknown", false), false, "ambiguous pointer actions must not be replayed");
 assert.equal(outcomeAfterCheck("unknown", "verified"), "worked", "newly verified evidence did not prove the request worked");
 assert.equal(outcomeAfterCheck("unknown", "preexisting"), "unknown", "preexisting evidence incorrectly proved the request worked");

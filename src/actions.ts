@@ -88,6 +88,11 @@ function containsEditable(node: OutlineNode): boolean {
 	return node.children.some(containsEditable);
 }
 
+function opensTransientFocus(node: OutlineNode): boolean {
+	const role = node.role.toLowerCase();
+	return role.includes("popupbutton") || role.includes("menubutton") || node.actions.includes("AXShowMenu");
+}
+
 export function prepareAction(action: UiAction, state: ActionState, env: ActionEnvironment): PreparedAction {
 	const operation = action.action;
 	if (operation === "wait") {
@@ -104,7 +109,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 	const establishesFocus = !env.headless
 		&& Boolean(action.ref)
 		&& (operation === "click" || operation === "press" || operation === "keypress" || operation === "select")
-		&& containsEditable(env.node(action.ref!));
+		&& (containsEditable(env.node(action.ref!)) || opensTransientFocus(env.node(action.ref!)));
 	const targetsEditableRef = Boolean(action.ref) && env.node(action.ref!).isTextInput;
 	const needsForeground = !env.headless && (operation === "click" || operation === "press") && ("x" in target || targetsEditableRef);
 
@@ -122,7 +127,7 @@ export function prepareAction(action: UiAction, state: ActionState, env: ActionE
 }
 
 export function canRetryInForeground(action: PreparedAction, outcome: "worked" | "didnt" | "unknown", headless: boolean): boolean {
-	return !headless && outcome === "didnt" && (action.action === "typeText" || action.action === "keypress");
+	return !headless && outcome === "didnt" && (action.action === "setText" || action.action === "typeText" || action.action === "keypress");
 }
 
 export function outcomeAfterCheck(current: "worked" | "didnt" | "unknown", check: "verified" | "preexisting" | "failed"): "worked" | "didnt" | "unknown" {

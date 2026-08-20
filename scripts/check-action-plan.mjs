@@ -130,4 +130,24 @@ assert.equal(cancelledPlan.nodes.find((node) => node.id === "running")?.status, 
 assert.equal(cancelledPlan.nodes.find((node) => node.id === "not-started")?.status, "cancelled", "pending plan node was not cancelled before delivery");
 assert.equal(cancelledPlan.nodes.find((node) => node.id === "not-started")?.error?.delivery, "definitely_not_delivered", "never-started cancellation lost delivery certainty");
 
+const selectorGuarded = await executeAdaptiveActionPlan({
+	nodes: [{ id: "dynamic-menu", stateId: "menu-state", actions: [{ action: "press", selector: { text: "Page", role: "menuitem", capability: "press" } }] }],
+}, {
+	execute: async (_node, stateId) => ({ stateId: `${stateId}:selected` }),
+	refresh: async () => "unused",
+	successorStateId: (result) => result.stateId,
+	classify,
+});
+assert.equal(selectorGuarded.status, "succeeded", "a runtime-resolved semantic selector was not accepted as its own checked target guard");
+await assert.rejects(
+	() => executeAdaptiveActionPlan({ nodes: [{ id: "unguarded", stateId: "state", actions: [{ action: "press", ref: "@e1" }] }] }, {
+		execute: async () => ({ stateId: "unused" }),
+		refresh: async () => "unused",
+		successorStateId: (result) => result.stateId,
+		classify,
+	}),
+	/requires live commit guards, or semantic selectors/,
+	"an unguarded fixed ref was accepted by the action-plan scheduler",
+);
+
 console.log(`Adaptive action-plan checks passed (fixture ${plan.durationMs}ms, peak concurrency ${plan.peakConcurrency}).`);

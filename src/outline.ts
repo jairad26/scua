@@ -95,6 +95,11 @@ export interface OutlineSearchMatch {
 	placeholder: string;
 	label: string;
 	rect?: OutlineRect;
+	/** Native semantic geometry before any visual grounding correction. */
+	semanticRect?: OutlineRect;
+	/** OCR geometry for the text which actually matched the query. */
+	visualRect?: OutlineRect;
+	grounding?: "semantic" | "ocr" | "conflict";
 	actions: string[];
 	path: string;
 	matchReason?: "exact" | "prefix" | "substring" | "fuzzy" | "filter";
@@ -481,9 +486,42 @@ export function searchOutlineRanked(outline: Outline, text?: string, role?: stri
 		if (roleQuery && normalizedSearchRole(node.role) !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;
 		const label = outlineNodeLabel(node);
-		const match = query ? rankedTextMatch([label, node.identifier, node.roleDescription, node.placeholder, node.title, node.description, node.value, ...node.text.map((item) => item.string)], query) : undefined;
+		const semanticMatch = query ? rankedTextMatch([label, node.identifier, node.roleDescription, node.placeholder, node.title, node.description, node.value], query) : undefined;
+		const visualMatches = query ? node.text
+			.map((item) => ({ item, match: rankedTextMatch([item.string], query) }))
+			.filter((candidate): candidate is { item: OutlineText; match: NonNullable<ReturnType<typeof rankedTextMatch>> } => Boolean(candidate.match))
+			.sort((left, right) => right.match.score - left.match.score) : [];
+		const visualMatch = visualMatches[0];
+		const match = !semanticMatch || (visualMatch?.match.score ?? 0) > semanticMatch.score ? visualMatch?.match : semanticMatch;
 		if (query && !match) continue;
-		const result = { ref: node.ref, role: node.role, subrole: node.subrole, identifier: node.identifier, roleDescription: node.roleDescription, placeholder: node.placeholder, label, rect: node.rect, actions: node.actions, path: outlineNodePath(node), matchReason: match?.reason ?? "filter" as const, score: match?.score ?? 1, node, order };
+		const visualRect = visualMatch?.item.rect;
+		const semanticRect = node.rect;
+		const visualCenterOutsideSemantic = Boolean(visualRect && semanticRect && (
+			visualRect.x + visualRect.w / 2 < semanticRect.x
+			|| visualRect.x + visualRect.w / 2 > semanticRect.x + semanticRect.w
+			|| visualRect.y + visualRect.h / 2 < semanticRect.y
+			|| visualRect.y + visualRect.h / 2 > semanticRect.y + semanticRect.h
+		));
+		const preferVisual = Boolean(visualRect && (!semanticMatch || visualMatch!.match.score > semanticMatch.score));
+		const result = {
+			ref: node.ref,
+			role: node.role,
+			subrole: node.subrole,
+			identifier: node.identifier,
+			roleDescription: node.roleDescription,
+			placeholder: node.placeholder,
+			label,
+			rect: preferVisual ? visualRect : semanticRect,
+			...(semanticRect ? { semanticRect } : {}),
+			...(visualRect ? { visualRect } : {}),
+			grounding: visualCenterOutsideSemantic ? "conflict" as const : preferVisual ? "ocr" as const : "semantic" as const,
+			actions: node.actions,
+			path: outlineNodePath(node),
+			matchReason: match?.reason ?? "filter" as const,
+			score: match?.score ?? 1,
+			node,
+			order,
+		};
 		(match?.reason === "fuzzy" ? fuzzy : strong).push(result);
 	}
 	const rank = { exact: 0, prefix: 1, substring: 2, filter: 3, fuzzy: 4 } as const;
@@ -615,6 +653,29 @@ function rebuildIndexes(outline: Outline): void {
 		}
 		queue.push(...node.children);
 	}
+}
+
+/**
+ * Electron applications can retain a detached document subtree as a 1x1
+ * AXWebArea after navigation. Keeping it makes old editors win otherwise-valid
+ * semantic searches. Only remove degenerate web areas when the same snapshot
+ * contains a real, non-degenerate web area; this is deliberately conservative.
+ */
+export function pruneDetachedWebAreas(outline: Outline): number {
+	const webAreas = outline.nodes.filter((node) => node.role.toLowerCase() === "axwebarea");
+	const live = webAreas.filter((node) => !node.offscreen && Boolean(node.rect) && node.rect!.w * node.rect!.h >= 64);
+	if (live.length === 0) return 0;
+	const detached = new Set(webAreas.filter((node) => node !== outline.root && (
+		node.offscreen || !node.rect || node.rect.w * node.rect.h < 16
+	)));
+	if (detached.size === 0) return 0;
+	const prune = (node: OutlineNode) => {
+		node.children = node.children.filter((child) => !detached.has(child));
+		for (const child of node.children) prune(child);
+	};
+	prune(outline.root);
+	rebuildIndexes(outline);
+	return detached.size;
 }
 
 function copyNodeFields(target: OutlineNode, source: OutlineNode, preserveWireRef = false): void {

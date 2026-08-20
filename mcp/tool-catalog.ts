@@ -49,19 +49,33 @@ function tool(
 const stateId = string("Immutable observation state owning every @e element reference used by this operation.");
 const point = { x: number("Window-relative x coordinate."), y: number("Window-relative y coordinate.") };
 const mouseButton = string("Mouse button.", { enum: ["left", "right", "middle"] });
+const selector = object({
+	text: string("Human-readable text or label."),
+	role: string("Exact normalized role, such as button or textbox."),
+	capability: string("Exact capability, such as press or setValue."),
+	match: string("Require one unambiguous match, or deliberately use the first ranked match.", { enum: ["unique", "first"], default: "unique" }),
+});
 
 const action: JsonSchema = {
 	oneOf: [
 		object({ action: { type: "string", const: "press" }, ref: string("Actionable element reference.") }, ["action", "ref"]),
+		object({ action: { type: "string", const: "press" }, selector }, ["action", "selector"]),
 		object({ action: { type: "string", const: "click" }, ref: string("Element reference."), button: mouseButton, clickCount: number("Click count.", { minimum: 1, maximum: 3 }) }, ["action", "ref"]),
+		object({ action: { type: "string", const: "click" }, selector, button: mouseButton, clickCount: number("Click count.", { minimum: 1, maximum: 3 }) }, ["action", "selector"]),
 		object({ action: { type: "string", const: "click" }, ...point, button: mouseButton, clickCount: number("Click count.", { minimum: 1, maximum: 3 }) }, ["action", "x", "y"]),
 		object({ action: { type: "string", const: "select" }, ref: string("Selectable element or descendant reference.") }, ["action", "ref"]),
+		object({ action: { type: "string", const: "select" }, selector }, ["action", "selector"]),
 		object({ action: { type: "string", const: "setText" }, ref: string("Editable element reference."), text: string("Replacement text.") }, ["action", "ref", "text"]),
+		object({ action: { type: "string", const: "setText" }, selector, text: string("Replacement text.") }, ["action", "selector", "text"]),
 		object({ action: { type: "string", const: "typeText" }, ref: string("Optional editable element reference."), text: string("Text to type.") }, ["action", "text"]),
+		object({ action: { type: "string", const: "typeText" }, selector, text: string("Text to type.") }, ["action", "selector", "text"]),
 		object({ action: { type: "string", const: "keypress" }, ref: string("Optional focused element reference."), keys: { type: "array", items: { type: "string" }, minItems: 1 } }, ["action", "keys"]),
+		object({ action: { type: "string", const: "keypress" }, selector, keys: { type: "array", items: { type: "string" }, minItems: 1 } }, ["action", "selector", "keys"]),
 		object({ action: { type: "string", const: "scroll" }, ref: string("Optional scrollable element reference."), scrollX: number("Horizontal delta."), scrollY: number("Vertical delta.") }, ["action"]),
+		object({ action: { type: "string", const: "scroll" }, selector, scrollX: number("Horizontal delta."), scrollY: number("Vertical delta.") }, ["action", "selector"]),
 		object({ action: { type: "string", const: "drag" }, path: { type: "array", items: object(point, ["x", "y"]), minItems: 2 } }, ["action", "path"]),
 		object({ action: { type: "string", const: "moveMouse" }, ref: string("Element reference whose semantic center should receive the visual agent cursor.") }, ["action", "ref"]),
+		object({ action: { type: "string", const: "moveMouse" }, selector }, ["action", "selector"]),
 		object({ action: { type: "string", const: "moveMouse" }, ...point }, ["action", "x", "y"]),
 		object({ action: { type: "string", const: "wait" }, ms: number("Focus-preserving delay before the next action in the same transaction.", { minimum: 0, maximum: 60_000 }) }, ["action", "ms"]),
 	],
@@ -91,6 +105,7 @@ const planNodeProperties: Record<string, JsonSchema> = {
 	actions: { type: "array", items: action, minItems: 1, maxItems: 20 },
 	guards: { type: "array", items: condition, minItems: 1, maxItems: 8 },
 	expect: condition,
+	skipIfExpected: { type: "boolean", description: "Skip delivery and return an unchanged successor when expect is already satisfied." },
 	conflictPolicy: string("Refresh and retry definitely-undelivered conflicts, or fail this branch immediately.", { enum: ["refresh", "abort"], default: "refresh" }),
 	retry: object({
 		maxAttempts: number("Total attempts including the first.", { minimum: 1, maximum: 3, default: 2 }),
@@ -100,8 +115,8 @@ const planNodeProperties: Record<string, JsonSchema> = {
 };
 const planNode: JsonSchema = {
 	oneOf: [
-		object({ ...planNodeProperties, stateId }, ["id", "stateId", "actions", "guards"]),
-		object({ ...planNodeProperties, stateFrom: string("Predecessor node whose successor state becomes this node's input.") }, ["id", "stateFrom", "dependsOn", "actions", "guards"]),
+		object({ ...planNodeProperties, stateId }, ["id", "stateId", "actions"]),
+		object({ ...planNodeProperties, stateFrom: string("Predecessor node whose successor state becomes this node's input.") }, ["id", "stateFrom", "dependsOn", "actions"]),
 	],
 };
 
@@ -203,13 +218,14 @@ export const mcpTools: McpToolDefinition[] = [
 			actions: { type: "array", items: action, minItems: 1, maxItems: 20 },
 			guards: { type: "array", items: condition, minItems: 1, maxItems: 8 },
 			expect: condition,
+			skipIfExpected: { type: "boolean", description: "Skip delivery when expect is already satisfied." },
 		}, ["stateId", "actions"]),
 		false,
 	),
 	tool(
 		"execute_plan",
 		"Execute adaptive action plan",
-		"Execute a guarded dependency DAG locally. Independent nodes overlap; successors flow through stateFrom; definitely-undelivered conflicts refresh and retry within a bounded budget; failed branches do not cancel unrelated work.",
+		"Execute a guarded dependency DAG locally. Actions may use semantic selectors resolved against each predecessor's successor state, so menus and editors need not exist when the plan is authored. Independent nodes overlap; definitely-undelivered conflicts refresh within a bounded budget.",
 		object({
 			planId: string("Optional caller-defined plan identifier."),
 			nodes: { type: "array", items: planNode, minItems: 1, maxItems: 64 },
