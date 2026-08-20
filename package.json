@@ -86,6 +86,7 @@
 		"test:chrome-workspace-live": "SCUA_CHROME_WORKSPACE_LIVE=1 node scripts/check-chrome-workspace-live.mjs",
 		"test:multi-agent-live": "SCUA_MULTI_AGENT_LIVE=1 node scripts/check-multi-agent-live.mjs",
 		"test:semantic-index-live": "SCUA_SEMANTIC_INDEX_LIVE=1 SCUA_AX_NODE_LIMIT=100 node scripts/check-semantic-index-live.mjs",
+		"test:semantic-targets-live": "SCUA_SEMANTIC_TARGETS_LIVE=1 node scripts/check-semantic-targets-live.mjs",
 		"test:logical-actors-live": "SCUA_LOGICAL_ACTORS_LIVE=1 node scripts/check-logical-actors-live.mjs",
 		"test:cancellation-live": "SCUA_CANCELLATION_LIVE=1 node scripts/check-cancellation-live.mjs",
 		"test:same-app-windows-live": "SCUA_SAME_APP_WINDOWS_LIVE=1 node scripts/check-same-app-windows-live.mjs",

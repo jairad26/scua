@@ -14,7 +14,9 @@ surface; it is not a permanent allowlist.
 | Finder Downloads | Native semantic observation and acknowledged independent agent-cursor move | Yes (`pid`), no HID/activation | `unknown` for visual-only cursor movement by design; overlay acknowledged | 0.34 s including successor observation |
 | Finder rename | Exact CG/AX window pairing, semantic filename discovery, generic semantic selection, one foreground attention lease, focused transient-editor HID sequence, external filesystem evaluator | Selection is AX/background-safe; commit requires foreground Return/text events | Requested successor text plus actual old/new filesystem paths | 0.21 s observation and 4.39 s checked mutation; prior 2.7 s/15 s failures are fixed |
 | Calendar | Quick-event creation, parsed event discovery, and cleanup through generic semantic actions | AX creation plus foreground Return commit | Event appears outside the editor before cleanup; cleanup is checked | 0.22 s observation; included in a four-app 8.75 s parallel run |
+| Calendar hidden fields | Missing URL textbox returns a structured disclosure candidate; pressing it reveals and writes `url-field` | Disclosure press and AX value write; foreground is needed only for quick-event Return commit | Exact URL value verified in the revealed field | Live regression passed 2026-08-20 |
 | Notes | Create a temporary note, set its body, verify exact value, and delete it | Yes (`ax`) for create/edit/delete | Exact body value and checked absence after delete | 1.59 s cold bounded observation; 3.83 s edit/delete actions |
+| Notion native app | Search-result metadata includes subrole, geometry, role description, and placeholder; exact title search resolves separately from the document body | Observation only in this regression | Distinct title/body refs on a live Notion page | Live regression passed 2026-08-20 |
 | Spotify native app | Electron search textbox replacement through generic AX/PID events, result discovery outside the input, and clear | Yes (`pid`), without focus transfer | Result content for `Raga of Madness`, not merely an echoed field value | 0.19 s observation; 0.28 s checked search action |
 | Spotify semantic-index torture run | Initial AX slice forced to 100 nodes; a target absent from that slice was discovered by continuation, then every live frontier was exhausted | Observation only | `search_ui` returned the target from a fresh immutable state; final index reported complete | Match at 208 indexed nodes in 0.20 s; complete at 524 nodes, 0 pending frontiers |
 | App Store custom surface | Search-field value, Return submit, result discovery outside the input, and clear | AX value plus foreground Return commit | `Notion` result appears outside the search field | 0.58 s observation; included in the four-app 8.75 s parallel run |
@@ -62,6 +64,7 @@ npm run test:same-app-windows-live
 npm run test:cancellation-live
 npm run test:subscriptions-live
 npm run test:real-app-mutations-live
+npm run test:semantic-targets-live
 npm run soak:orchestrator-live
 ```
 

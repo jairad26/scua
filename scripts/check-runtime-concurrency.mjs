@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction } from "../src/actions.ts";
 import { searchMayEscalateToDesktopOcr, transactionNeedsVerifiedVisualDelivery } from "../src/bridge.ts";
-import { graftScopedOutline, nodeByRef, parseLookResponse } from "../src/outline.ts";
+import { graftScopedOutline, nodeByRef, parseLookResponse, revealCandidates, searchOutlineRanked } from "../src/outline.ts";
 import { rebindActParams, TargetRebindError } from "../src/rebind.ts";
 import { ResourceScheduler, StateStore, StaleResourceStateError } from "../src/runtime.ts";
 import { changesBetween, stabilizeRefs } from "../src/view.ts";
@@ -54,6 +54,34 @@ stabilizeRefs(baseLook.parsedOutline, regeneratedLook.parsedOutline);
 const regeneratedEditor = regeneratedLook.parsedOutline.nodes.find((node) => node.wireRef === "editor-new");
 assert.equal(regeneratedEditor?.ref, baseLook.parsedOutline.wireRefToRef.get("editor"), "structurally stable nodes did not retain refs when native refs regenerated");
 assert.equal(changesBetween(baseLook.parsedOutline, regeneratedLook.parsedOutline).useFullView, false, "regenerated native refs forced an unnecessary full view");
+
+const describedFields = rawLook("described-fields", [
+	{ ref: "title-field", role: "AXTextArea", roleDescription: "page title", placeholder: "Untitled", canSetValue: true, isTextInput: true },
+	{ ref: "body-field", role: "AXTextArea", roleDescription: "text entry area", canSetValue: true, isTextInput: true },
+]);
+assert.equal(searchOutlineRanked(describedFields.parsedOutline, "page title", "textbox", "setValue").matches[0]?.node.wireRef, "title-field", "editable role descriptions did not disambiguate title and body controls");
+assert.equal(searchOutlineRanked(describedFields.parsedOutline, "text entry area", "textbox", "setValue").matches[0]?.node.wireRef, "body-field", "editable body semantics were not searchable");
+
+const hiddenControlLook = rawLook("hidden-control", [
+	{ ref: "save", role: "AXButton", title: "Save", canPress: true },
+	{ ref: "disclosure", role: "AXButton", title: "Add Notes, URL, or Attachments", canPress: true },
+]);
+assert.equal(revealCandidates(hiddenControlLook.parsedOutline)[0]?.node.wireRef, "disclosure", "hidden controls did not surface a generic pressable disclosure candidate");
+
+const virtualizedBase = rawLook("virtualized-base", [
+	{ ref: "virtual-row", role: "AXRow", title: "Jai Radhakrishnan", canPress: true },
+]);
+const virtualizedFresh = rawLook("virtualized-fresh", [
+	{ ref: "virtual-row", role: "AXRow", title: "deployments", canPress: true },
+]);
+const oldVirtualRef = virtualizedBase.parsedOutline.wireRefToRef.get("virtual-row");
+stabilizeRefs(virtualizedBase.parsedOutline, virtualizedFresh.parsedOutline);
+assert.notEqual(virtualizedFresh.parsedOutline.wireRefToRef.get("virtual-row"), oldVirtualRef, "a repurposed virtual row retained the prior semantic ref");
+assert.throws(
+	() => rebindActParams({ stateId: "old", actions: [{ action: "press", ref: oldVirtualRef }] }, virtualizedBase.parsedOutline, virtualizedFresh.parsedOutline, "new"),
+	(error) => error instanceof TargetRebindError && error.delivery === "definitely_not_delivered",
+	"a repurposed live wire ref rebound to a different semantic row",
+);
 
 const editor = nextLook.parsedOutline.nodes.find((node) => node.wireRef === "editor");
 assert(editor, "editor fixture was not parsed");

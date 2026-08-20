@@ -85,8 +85,8 @@ const observeTool = defineTool({
 const searchUiTool = defineTool({
 	name: "search_ui",
 	label: "Search UI",
-	description: "Return one or up to sixteen bounded, deterministically ranked searches of the cached outline.",
-	promptSnippet: "Batch independent target selectors in queries; refine broad searches instead of paging matches.",
+	description: "Return one or up to sixteen bounded, deterministically ranked searches of the cached outline, including likely pressable disclosures when a requested control is hidden.",
+	promptSnippet: "Batch independent target selectors in queries; when a result identifies a disclosure candidate, press it and search the successor state.",
 	parameters: Type.Object({
 		id: Type.Optional(Type.String({ description: "Optional caller label", maxLength: 128 })),
 		text: Type.Optional(Type.String({ description: "Human-readable text or label", maxLength: 256 })),

@@ -187,6 +187,8 @@ final class LookNode {
 	let role: String
 	let subrole: String
 	let identifier: String
+	let roleDescription: String
+	let placeholder: String
 	let title: String
 	let description: String
 	let value: String
@@ -209,12 +211,14 @@ final class LookNode {
 	var text: [[String: Any]]
 	var children: [LookNode]
 
-	init(element: AXUIElement?, ref: String, role: String, subrole: String, identifier: String, title: String, description: String, value: String, actions: [String], canPress: Bool, canFocus: Bool, canSetValue: Bool, canScroll: Bool, canIncrement: Bool, canDecrement: Bool, isTextInput: Bool, rect: CGRect, focused: Bool = false, offscreen: Bool = false, pictureOnly: Bool = false) {
+	init(element: AXUIElement?, ref: String, role: String, subrole: String, identifier: String, roleDescription: String = "", placeholder: String = "", title: String, description: String, value: String, actions: [String], canPress: Bool, canFocus: Bool, canSetValue: Bool, canScroll: Bool, canIncrement: Bool, canDecrement: Bool, isTextInput: Bool, rect: CGRect, focused: Bool = false, offscreen: Bool = false, pictureOnly: Bool = false) {
 		self.element = element
 		self.ref = ref
 		self.role = role
 		self.subrole = subrole
 		self.identifier = identifier
+		self.roleDescription = roleDescription
+		self.placeholder = placeholder
 		self.title = title
 		self.description = description
 		self.value = value
@@ -243,6 +247,8 @@ final class LookNode {
 			"role": role,
 			"subrole": subrole,
 			"identifier": identifier,
+			"roleDescription": roleDescription,
+			"placeholder": placeholder,
 			"title": title,
 			"description": description,
 			"value": value,
@@ -1799,6 +1805,8 @@ final class Bridge {
 			kAXDescriptionAttribute as CFString,
 			kAXValueAttribute as CFString,
 			"AXIdentifier" as CFString,
+			"AXRoleDescription" as CFString,
+			"AXPlaceholderValue" as CFString,
 			kAXFocusedAttribute as CFString,
 			kAXPositionAttribute as CFString,
 			kAXSizeAttribute as CFString,
@@ -1820,6 +1828,8 @@ final class Bridge {
 		let size = sizeValue(values[kAXSizeAttribute as String])
 		let screenRect = origin.flatMap { origin in size.map { CGRect(origin: origin, size: $0) } } ?? .zero
 		let identifier = values["AXIdentifier"] as? String ?? ""
+		let roleDescription = values["AXRoleDescription"] as? String ?? ""
+		let placeholder = values["AXPlaceholderValue"] as? String ?? ""
 		let node = LookNode(
 			element: element,
 			ref: refStore.storeElement(element, snapshot: AXRefStore.Snapshot(
@@ -1831,6 +1841,8 @@ final class Bridge {
 			role: role,
 			subrole: subrole,
 			identifier: identifier,
+			roleDescription: roleDescription,
+			placeholder: placeholder,
 			title: title,
 			description: description,
 			value: value,
@@ -2258,6 +2270,30 @@ final class Bridge {
 		}
 	}
 
+	private func elementMatchesExpectedIdentity(_ element: AXUIElement, expected: [String: Any]) -> Bool {
+		let role = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
+		let subrole = stringAttribute(element, attribute: kAXSubroleAttribute as CFString) ?? ""
+		let identifier = stringAttribute(element, attribute: "AXIdentifier" as CFString) ?? ""
+		let roleDescription = stringAttribute(element, attribute: "AXRoleDescription" as CFString) ?? ""
+		let placeholder = stringAttribute(element, attribute: "AXPlaceholderValue" as CFString) ?? ""
+		if let captured = expected["role"] as? String, role != captured { return false }
+		if let captured = expected["subrole"] as? String, !captured.isEmpty, subrole != captured { return false }
+		if let captured = expected["identifier"] as? String, !captured.isEmpty, identifier != captured { return false }
+		if let captured = expected["roleDescription"] as? String, !captured.isEmpty, roleDescription != captured { return false }
+		if let captured = expected["placeholder"] as? String, !captured.isEmpty, placeholder != captured { return false }
+		// Editable values are expected to change inside a transaction. For static
+		// rows/buttons, however, the accessible label is the only identity many
+		// virtualized Electron controls expose, so a changed label means stale.
+		let editable = expected["editable"] as? Bool ?? false
+		if !editable, let captured = expected["label"] as? String, !captured.isEmpty {
+			let title = stringAttribute(element, attribute: kAXTitleAttribute as CFString) ?? ""
+			let description = stringAttribute(element, attribute: kAXDescriptionAttribute as CFString) ?? ""
+			let value = displayValue(element, role: role, subrole: subrole)
+			if normalizedLabel([title, description, value].joined(separator: " ")) != normalizedLabel(captured) { return false }
+		}
+		return true
+	}
+
 	private func hitTest(_ request: [String: Any]) throws -> [String: Any] {
 		let lookId = try stringArg(request, "lookId")
 		guard let record = lookRecord(for: lookId) else {
@@ -2338,6 +2374,9 @@ final class Bridge {
 			}
 			guard let stored = resolved else {
 				throw BridgeFailure(message: "Element reference is stale", code: "stale_ref")
+			}
+			if let expected = request["expectedTarget"] as? [String: Any], !elementMatchesExpectedIdentity(stored, expected: expected) {
+				throw BridgeFailure(message: "Element reference is live but no longer represents the captured semantic target", code: "stale_ref")
 			}
 			if refound { performed["refound"] = true }
 			element = stored
@@ -2496,7 +2535,32 @@ final class Bridge {
 			let elementRole = stringAttribute(element, attribute: kAXRoleAttribute as CFString) ?? ""
 			let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXTextView", "AXSearchField", "AXComboBox", "AXEditableText", "AXSecureTextField"]
 			let requiresPointerFocus = hasAncestorRole(element, role: "AXWebArea") || textRoles.contains(elementRole)
-			if supportsAction(element, action: kAXPressAction as CFString) {
+			var activatedVirtualizedRow = false
+			if action == "press" && elementRole == "AXRow" && hasAncestorRole(element, role: "AXWebArea") && delivery == "pid" {
+				var candidate: AXUIElement? = element
+				var depth = 0
+				while let current = candidate, depth < 4 {
+					var selectedSettable = DarwinBoolean(false)
+					if AXUIElementIsAttributeSettable(current, kAXSelectedAttribute as CFString, &selectedSettable) == .success, selectedSettable.boolValue,
+						AXUIElementSetAttributeValue(current, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success
+					{
+						_ = AXUIElementSetAttributeValue(current, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+						if let cursorPoint = try? coordinatePoint() { animateCursor(at: cursorPoint) }
+						try postKeyPress(keys: ["return"], pid: pid, delivery: delivery)
+						performed["grounding"] = "selection-keyboard"
+						performed["delivery"] = delivery
+						performed["selectedAncestorDepth"] = depth
+						activatedVirtualizedRow = true
+						break
+					}
+					candidate = parentElement(current)
+					depth += 1
+				}
+			}
+			if activatedVirtualizedRow {
+				// Outcome remains verification-driven below; the Return event is
+				// delivery evidence, not proof that the intended row opened.
+			} else if supportsAction(element, action: kAXPressAction as CFString) {
 				// Electron and web-wrapper apps expose real AXPress actions below an
 				// AXWebArea. Those semantic actions are background-safe and should not
 				// be rejected merely because a pointer fallback would need focus.
@@ -2580,9 +2644,9 @@ final class Bridge {
 					if !insideWebArea {
 						return finish(["outcome": "worked", "performed": performed, "evidence": ["value": value, "eventDispatch": "not_required"]])
 					}
-					if policy == "ax_only" {
-						return finish(["outcome": "unknown", "performed": performed, "evidence": ["value": value, "eventDispatch": "not_verified"]])
-					}
+					// Web/Electron controls can reflect AXValue while their application
+					// state remains unchanged. PID-targeted key events are background-safe,
+					// including under strict headless policy, so continue to event dispatch.
 				}
 				if !insideWebArea && policy != "foreground" {
 					throw BridgeFailure(message: "The background accessibility value write was accepted but did not take effect", code: "foreground_required")

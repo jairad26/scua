@@ -11,7 +11,7 @@ import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGeneration
 import { chromeExtensionAvailable, chromeExtensionCloseWorkspace } from "./chrome-extension-bridge.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
-import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
+import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, revealCandidates, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
 import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ReadUiEventsParams, type RootSelector, type SearchUiParams, type SubscribeUiParams, type UiAction, type UiCondition, type UnsubscribeUiParams, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
@@ -304,10 +304,12 @@ interface OutlineToolDetails {
 	returned?: number;
 	hasMore?: boolean;
 	matches?: SerializedOutlineSearchMatch[];
+	revealCandidates?: SerializedOutlineSearchMatch[];
 	queryResults?: Array<{
 		id?: string;
 		query: { text?: string; role?: string; capability?: string };
 		matches: SerializedOutlineSearchMatch[];
+		revealCandidates?: SerializedOutlineSearchMatch[];
 		totalMatches: number;
 		returned: number;
 		hasMore: boolean;
@@ -1815,7 +1817,17 @@ async function helperAct(
 function helperActRequest(target: ResolvedTarget, action: NativePreparedAction, policy = currentDeliveryPolicy()): PlatformActRequest {
 	const look = currentLookOrThrow();
 	const delivery = nativeInputDelivery(policy);
-	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy, userQuietPeriodMs: policy === "foreground" ? getComputerUseConfig().user_quiet_period_ms : 0 };
+	const expectedNode = "ref" in action.target && look.parsedOutline ? nodeByRef(look.parsedOutline, action.target.ref) : undefined;
+	const expectedTarget = expectedNode ? {
+		role: expectedNode.role,
+		subrole: expectedNode.subrole,
+		identifier: expectedNode.identifier,
+		roleDescription: expectedNode.roleDescription,
+		placeholder: expectedNode.placeholder,
+		label: outlineNodeLabel(expectedNode),
+		editable: expectedNode.isTextInput || expectedNode.canSetValue,
+	} : undefined;
+	const base = { lookId: look.lookId, agentId: visualAgentId(), pid: target.pid, target: action.target, policy, ...(expectedTarget ? { expectedTarget } : {}), userQuietPeriodMs: policy === "foreground" ? getComputerUseConfig().user_quiet_period_ms : 0 };
 	return (() => {
 		switch (action.action) {
 			case "press":
@@ -2618,15 +2630,20 @@ async function performSearchUi(params: SearchUiParams, signal?: AbortSignal): Pr
 		...(queries[index].id ? { id: queries[index].id } : {}),
 		query: { ...(queries[index].text ? { text: queries[index].text } : {}), ...(queries[index].role ? { role: queries[index].role } : {}), ...(queries[index].capability ? { capability: queries[index].capability } : {}) },
 		matches: result.matches.map(serializeOutlineSearchMatch),
+		...(result.totalMatches === 0 ? { revealCandidates: revealCandidates(outline, queries[index].text).map(serializeOutlineSearchMatch) } : {}),
 		totalMatches: result.totalMatches,
 		returned: result.matches.length,
 		hasMore: result.totalMatches > result.matches.length,
 	}));
 	const single = queryResults.length === 1 ? queryResults[0] : undefined;
-	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, ...(single ? { matches: single.matches, totalMatches: single.totalMatches, returned: single.returned, hasMore: single.hasMore } : { queryResults }), note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
+	const details: OutlineToolDetails = { tool: "search_ui", stateId: state.currentCapture?.stateId, lookId: outline.lookId, ...(single ? { matches: single.matches, revealCandidates: single.revealCandidates, totalMatches: single.totalMatches, returned: single.returned, hasMore: single.hasMore } : { queryResults }), note: state.currentNote, ...(semanticIndex ? { semanticIndex: semanticIndexStatus(semanticIndex) } : {}) };
 	const lines = queryResults.flatMap((result, index) => [
 		`query ${result.id ?? index + 1} ${JSON.stringify(result.query)}: ${result.totalMatches} match${result.totalMatches === 1 ? "" : "es"}; returned ${result.returned}`,
-		...result.matches.map((match) => `${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]\n  path: ${match.path}`),
+		...result.matches.map((match) => `${match.ref} ${match.role || "Unknown"}${match.subrole ? `/${match.subrole}` : ""} ${JSON.stringify(match.label || "(unlabeled)")} [${match.matchReason}${match.matchReason === "fuzzy" ? ` ${match.score?.toFixed(2)}` : ""}]${match.rect ? ` at (${Math.round(match.rect.x)},${Math.round(match.rect.y)},${Math.round(match.rect.w)}x${Math.round(match.rect.h)})` : ""}${match.roleDescription ? ` roleDescription=${JSON.stringify(match.roleDescription)}` : ""}${match.placeholder ? ` placeholder=${JSON.stringify(match.placeholder)}` : ""}\n  path: ${match.path}`),
+		...(result.revealCandidates?.length ? [
+			`  no matching control is currently exposed; likely disclosures (press one, then search the successor state):`,
+			...result.revealCandidates.map((match) => `  ${match.ref} ${match.role || "Unknown"} ${JSON.stringify(match.label || "(unlabeled)")}\n    path: ${match.path}`),
+		] : []),
 	]);
 	const noteHeader = renderNote(state.currentNote);
 	const noteText = noteHeader ? `${noteHeader}\n\n` : "";

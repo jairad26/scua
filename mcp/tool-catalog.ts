@@ -171,7 +171,7 @@ export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"search_ui",
 		"Search cached UI",
-		"Search the complete cached outline without rescanning the live application. Batch independent selectors in queries to avoid model round trips.",
+		"Search the complete cached outline without rescanning the live application. Batch independent selectors in queries to avoid model round trips. If a requested control is hidden, results identify likely pressable disclosures; press one and search the successor state.",
 		{
 			oneOf: [
 				object({ stateId, ...searchQueryProperties }, ["stateId"]),

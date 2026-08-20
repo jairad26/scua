@@ -22,6 +22,8 @@ export interface OutlineNode {
 	role: string;
 	subrole: string;
 	identifier: string;
+	roleDescription: string;
+	placeholder: string;
 	title: string;
 	description: string;
 	value: string;
@@ -87,7 +89,12 @@ export interface LookResponse {
 export interface OutlineSearchMatch {
 	ref: string;
 	role: string;
+	subrole: string;
+	identifier: string;
+	roleDescription: string;
+	placeholder: string;
 	label: string;
+	rect?: OutlineRect;
 	actions: string[];
 	path: string;
 	matchReason?: "exact" | "prefix" | "substring" | "fuzzy" | "filter";
@@ -183,6 +190,8 @@ function parseNode(raw: unknown, parent?: OutlineNode): OutlineNode {
 		role: toString(record.role),
 		subrole: toString(record.subrole),
 		identifier: toString(record.identifier),
+		roleDescription: toString(record.roleDescription),
+		placeholder: toString(record.placeholder),
 		title: toString(record.title),
 		description: toString(record.description),
 		value: toString(record.value),
@@ -273,7 +282,7 @@ export function nodeByRef(outline: Outline, ref: string): OutlineNode | undefine
 }
 
 export function outlineNodeLabel(node: OutlineNode): string {
-	return node.title || node.description || node.value || node.identifier || node.text.map((item) => item.string).join(" ").trim();
+	return node.title || node.description || node.placeholder || node.roleDescription || node.value || node.identifier || node.text.map((item) => item.string).join(" ").trim();
 }
 
 function displayName(node: OutlineNode): string {
@@ -445,10 +454,10 @@ function damerauLevenshtein(a: string, b: string): number {
 	return matrix[a.length][b.length];
 }
 
-export function rankedTextMatch(values: string[], text: string): { reason: "exact" | "prefix" | "substring" | "fuzzy"; score: number } | undefined {
+export function rankedTextMatch(values: Array<string | undefined>, text: string): { reason: "exact" | "prefix" | "substring" | "fuzzy"; score: number } | undefined {
 	const query = text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 256);
 	if (!query) return undefined;
-	const candidates = values.map((value) => value.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 512)).filter(Boolean);
+	const candidates = values.map((value) => (value ?? "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 512)).filter(Boolean);
 	if (candidates.some((value) => value === query)) return { reason: "exact", score: 1 };
 	if (candidates.some((value) => value.startsWith(query) || value.split(/\W+/).some((token) => token.startsWith(query)))) return { reason: "prefix", score: 0.95 };
 	if (candidates.some((value) => value.includes(query))) return { reason: "substring", score: 0.9 };
@@ -472,9 +481,9 @@ export function searchOutlineRanked(outline: Outline, text?: string, role?: stri
 		if (roleQuery && normalizedSearchRole(node.role) !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;
 		const label = outlineNodeLabel(node);
-		const match = query ? rankedTextMatch([label, node.identifier, node.title, node.description, node.value, ...node.text.map((item) => item.string)], query) : undefined;
+		const match = query ? rankedTextMatch([label, node.identifier, node.roleDescription, node.placeholder, node.title, node.description, node.value, ...node.text.map((item) => item.string)], query) : undefined;
 		if (query && !match) continue;
-		const result = { ref: node.ref, role: node.role, label, actions: node.actions, path: outlineNodePath(node), matchReason: match?.reason ?? "filter" as const, score: match?.score ?? 1, node, order };
+		const result = { ref: node.ref, role: node.role, subrole: node.subrole, identifier: node.identifier, roleDescription: node.roleDescription, placeholder: node.placeholder, label, rect: node.rect, actions: node.actions, path: outlineNodePath(node), matchReason: match?.reason ?? "filter" as const, score: match?.score ?? 1, node, order };
 		(match?.reason === "fuzzy" ? fuzzy : strong).push(result);
 	}
 	const rank = { exact: 0, prefix: 1, substring: 2, filter: 3, fuzzy: 4 } as const;
@@ -482,6 +491,26 @@ export function searchOutlineRanked(outline: Outline, text?: string, role?: stri
 	const useFuzzy = sorted.length < limit;
 	if (useFuzzy) sorted.push(...fuzzy.sort((a, b) => b.score! - a.score! || a.order - b.order));
 	return { matches: sorted.slice(0, limit).map(({ order: _order, ...match }) => match), totalMatches: strong.length + (useFuzzy ? fuzzy.length : 0) };
+}
+
+/** When a requested control is absent, surface explicit pressable disclosures
+ * that may reveal it. This is advisory and never mutates UI from a read tool. */
+export function revealCandidates(outline: Outline, text?: string, limit = 5): OutlineSearchMatch[] {
+	const query = text?.trim();
+	const disclosureVerb = /\b(add|show|more|details?|expand|reveal|advanced|edit|options?)\b/i;
+	const candidates: Array<OutlineSearchMatch & { order: number }> = [];
+	for (const [order, node] of outline.nodes.entries()) {
+			if (!node.canPress) continue;
+			const label = outlineNodeLabel(node);
+			if (!label || !disclosureVerb.test(label)) continue;
+			const textMatch = query ? rankedTextMatch([label, node.title, node.description, node.placeholder, node.roleDescription], query) : undefined;
+			const score = textMatch?.score ?? 0.5;
+			candidates.push({ ref: node.ref, role: node.role, subrole: node.subrole, identifier: node.identifier, roleDescription: node.roleDescription, placeholder: node.placeholder, label, rect: node.rect, actions: node.actions, path: outlineNodePath(node), matchReason: textMatch?.reason ?? "filter", score, node, order });
+	}
+	return candidates
+		.sort((left, right) => right.score! - left.score! || left.order - right.order)
+		.slice(0, limit)
+		.map(({ order: _order, ...match }) => match);
 }
 
 export function searchOutline(outline: Outline, text?: string, role?: string, action?: string, limit = 50): OutlineSearchMatch[] {
@@ -494,11 +523,11 @@ export function searchOutline(outline: Outline, text?: string, role?: string, ac
 		// outlineNodeLabel short-circuits (title || description || value), so
 		// list the fields individually too or a titled node's value/description
 		// can never match.
-		const haystack = [label, node.role, node.subrole, node.identifier, node.title, node.description, node.value, ...node.text.map((item) => item.string)].join(" ").toLowerCase();
+		const haystack = [label, node.role, node.subrole, node.identifier, node.roleDescription, node.placeholder, node.title, node.description, node.value, ...node.text.map((item) => item.string)].join(" ").toLowerCase();
 		if (query && !haystack.includes(query)) continue;
 		if (roleQuery && node.role !== roleQuery) continue;
 		if (actionQuery && !actionMatches(node, actionQuery)) continue;
-		matches.push({ ref: node.ref, role: node.role, label, actions: node.actions, path: outlineNodePath(node), node });
+		matches.push({ ref: node.ref, role: node.role, subrole: node.subrole, identifier: node.identifier, roleDescription: node.roleDescription, placeholder: node.placeholder, label, rect: node.rect, actions: node.actions, path: outlineNodePath(node), node });
 		if (matches.length >= limit) break;
 	}
 	return matches;

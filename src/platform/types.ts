@@ -170,6 +170,17 @@ export interface PlatformActRequestBase {
 	agentId?: string;
 	pid?: number;
 	target: PlatformActTarget;
+	/** Semantic identity captured in the immutable state. Native backends use it
+	 * to reject live-but-repurposed virtualized controls before delivery. */
+	expectedTarget?: {
+		role: string;
+		subrole: string;
+		identifier: string;
+		roleDescription: string;
+		placeholder: string;
+		label: string;
+		editable: boolean;
+	};
 	policy: PlatformDeliveryPolicy;
 	/** Minimum hardware-user idle interval required before foreground/HID work. */
 	userQuietPeriodMs?: number;

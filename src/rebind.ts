@@ -26,6 +26,7 @@ interface TargetFingerprint {
 	role: string;
 	identifier: string;
 	label: string;
+	editable: boolean;
 	structuralPath: string;
 	rect?: OutlineRect;
 }
@@ -35,7 +36,7 @@ function normalized(value: string): string {
 }
 
 function structuralToken(node: OutlineNode): string {
-	return [node.role, node.subrole, node.identifier, outlineNodeLabel(node)].map(normalized).join("|");
+	return [node.role, node.subrole, node.identifier, node.roleDescription, node.placeholder, outlineNodeLabel(node)].map(normalized).join("|");
 }
 
 function structuralPath(node: OutlineNode): string {
@@ -59,6 +60,7 @@ function fingerprint(ref: string, outline: Outline): TargetFingerprint {
 		role: normalized(node.role),
 		identifier: normalized(node.identifier),
 		label: normalized(outlineNodeLabel(node)),
+		editable: node.isTextInput || node.canSetValue,
 		structuralPath: structuralPath(node),
 		rect: node.rect,
 	};
@@ -90,7 +92,9 @@ function geometryWinner(candidates: OutlineNode[], rect: OutlineRect | undefined
 function matchFingerprint(target: TargetFingerprint, outline: Outline): ReboundReference {
 	if (target.wireRef) {
 		const node = outline.nodes.find((candidate) => candidate.wireRef === target.wireRef);
-		if (node) return { from: target.ref, to: node.ref, matchedBy: "wire_ref" };
+		if (node && normalized(node.role) === target.role && (!target.identifier || normalized(node.identifier) === target.identifier) && (target.editable || !target.label || normalized(outlineNodeLabel(node)) === target.label)) {
+			return { from: target.ref, to: node.ref, matchedBy: "wire_ref" };
+		}
 	}
 
 	if (target.identifier) {

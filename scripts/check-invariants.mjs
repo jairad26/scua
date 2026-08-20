@@ -267,6 +267,10 @@ check("INV-15 cross-platform semantic roles and web-wrapper AXPress", () => {
 	const pressBranch = swift.indexOf('if supportsAction(element, action: kAXPressAction as CFString)');
 	const pointerBranch = swift.indexOf('else if requiresPointerFocus && policy != "ax_only"', pressBranch);
 	assert(pressBranch >= 0 && pointerBranch > pressBranch, "web-wrapper AXPress is rejected before the semantic action is attempted");
+	assert(ts.includes("expectedTarget") && swift.includes("elementMatchesExpectedIdentity") && swift.includes("live but no longer represents"), "live virtualized targets are not checked against immutable semantic identity");
+	assert(outline.includes("roleDescription") && outline.includes("placeholder") && outline.includes("rect: node.rect"), "editable search results lack disambiguating semantic and geometry metadata");
+	assert(ts.includes("revealCandidates: single.revealCandidates") && outline.includes("export function revealCandidates"), "hidden controls do not expose structured disclosure candidates");
+	assert(swift.includes("including under strict headless policy, so continue to event dispatch"), "headless Electron value writes can stop before application input events");
 });
 
 check("INV-15 bounded successor observations", () => {

@@ -22,7 +22,18 @@ function rebuildIndexes(outline: Outline): void {
 }
 
 function structuralToken(node: OutlineNode): string {
-	return [node.role, node.subrole, node.identifier, node.title, node.description].map((value) => value.trim().toLowerCase()).join("|");
+	return [node.role, node.subrole, node.identifier, node.roleDescription, node.placeholder, node.title, node.description].map((value) => value.trim().toLowerCase()).join("|");
+}
+
+function wireIdentityCompatible(base: OutlineNode, next: OutlineNode): boolean {
+	if (base.role !== next.role || base.subrole !== next.subrole) return false;
+	if (base.identifier || next.identifier) return base.identifier === next.identifier;
+	if (base.roleDescription || next.roleDescription) return base.roleDescription === next.roleDescription;
+	if (base.placeholder || next.placeholder) return base.placeholder === next.placeholder;
+	if (base.isTextInput || base.canSetValue || next.isTextInput || next.canSetValue) return true;
+	const baseLabel = [base.title, base.description, base.value].join(" ").trim().toLowerCase();
+	const nextLabel = [next.title, next.description, next.value].join(" ").trim().toLowerCase();
+	return !baseLabel || !nextLabel || baseLabel === nextLabel;
 }
 
 function structuralKey(node: OutlineNode): string {
@@ -43,7 +54,7 @@ export function stabilizeRefs(base: Outline | undefined, next: Outline): Outline
 	if (!base) return next;
 	const reserved = new Set<string>();
 	const assigned = new Set<OutlineNode>();
-	const byWireRef = new Map(base.nodes.filter((node) => node.wireRef).map((node) => [node.wireRef!, node.ref]));
+	const byWireRef = new Map(base.nodes.filter((node) => node.wireRef).map((node) => [node.wireRef!, node]));
 	const structuralGroups = new Map<string, OutlineNode[]>();
 	for (const node of base.nodes) {
 		const key = structuralKey(node);
@@ -51,7 +62,8 @@ export function stabilizeRefs(base: Outline | undefined, next: Outline): Outline
 	}
 	let nextIndex = Math.max(0, ...base.nodes.map((node) => numericRef(node.ref))) + 1;
 	for (const node of next.nodes) {
-		const wireStable = node.wireRef ? byWireRef.get(node.wireRef) : undefined;
+		const wireCandidate = node.wireRef ? byWireRef.get(node.wireRef) : undefined;
+		const wireStable = wireCandidate && wireIdentityCompatible(wireCandidate, node) ? wireCandidate.ref : undefined;
 		const structuralMatches = structuralGroups.get(structuralKey(node)) ?? [];
 		const stable = wireStable ?? (structuralMatches.length === 1 ? structuralMatches[0].ref : undefined);
 		if (stable && !reserved.has(stable)) {
