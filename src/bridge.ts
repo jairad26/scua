@@ -3342,10 +3342,9 @@ async function performLaunchBrowserUnlocked(params: LaunchBrowserParams, signal?
 	const requestedUrl = trimOrUndefined(params.url);
 	if (requestedUrl && !/^https?:\/\//i.test(requestedUrl)) throw new Error("launch_browser.url must be an absolute HTTP(S) URL.");
 	const url = requestedUrl ?? "about:blank";
-	const extensionReady = await chromeExtensionAvailable();
-	const existingPage = extensionReady
-		? await createCdpPageContext(url)
-		: await createManagedCdpPageContext(url).catch(() => undefined);
+	// Attempt the requested extension operation directly. A separate short ping
+	// is both redundant and prone to false negatives during concurrent fan-out.
+	const existingPage = await createCdpPageContext(url);
 	if (existingPage) return await observeCreatedBrowserPage(existingPage);
 	if (runtimeState.managedBrowserCdpPort) {
 		await closeCdpBrowser(runtimeState.managedBrowserCdpPort);

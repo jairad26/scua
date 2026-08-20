@@ -11,9 +11,12 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const extensionDir = path.join(root, "chrome-extension");
 const serviceWorkerPath = path.join(extensionDir, "service-worker.js");
+const bridgePath = path.join(root, "src", "chrome-extension-bridge.ts");
 const hostPath = path.join(root, "scripts", "chrome-native-host.mjs");
 const manifest = JSON.parse(await fs.readFile(path.join(extensionDir, "manifest.json"), "utf8"));
 const worker = await fs.readFile(serviceWorkerPath, "utf8");
+const bridge = await fs.readFile(bridgePath, "utf8");
+const cdp = await fs.readFile(path.join(root, "src", "cdp.ts"), "utf8");
 
 assert.equal(manifest.manifest_version, 3);
 assert.deepEqual(new Set(manifest.permissions), new Set(["debugger", "nativeMessaging", "storage", "tabGroups", "tabs"]));
@@ -24,6 +27,11 @@ assert.match(worker, /Tab \$\{tabId\} is not owned by SCUA workspace/, "CDP comm
 assert.match(worker, /case "workspace\.close"/, "session cleanup cannot close its owned Chrome workspace");
 assert.match(worker, /workspaceMutations/, "concurrent first-tab creation is not serialized per workspace");
 assert.match(worker, /tabs\.onRemoved[\s\S]*mutateWorkspace/, "tab-removal cleanup bypasses the workspace mutation lane");
+assert.match(worker, /finishWorkspaceTab\(tab\)/, "tab readiness is finalized outside workspace allocation");
+assert.match(worker, /waitForTabReady\(tab\.tabId\)/, "new Chrome tabs can be observed before their requested document is ready");
+assert.match(bridge, /retryablePreconnectError/, "Chrome relay retries only pre-connect transport failures");
+assert.match(bridge, /requestSent !== true/, "Chrome relay does not replay requests that may have been delivered");
+assert.match(cdp, /requestSent === true\) throw error/, "Chrome tab creation can replay a request with uncertain delivery through managed CDP");
 assert.match(worker, /chrome\.tabs\.group/, "agent-created tabs are not grouped");
 assert.match(worker, /scua-extension-tab:/, "extension targets do not use a reserved SCUA namespace");
 assert.doesNotMatch(worker, /chrome\.tabs\.query\(\{\}\)/, "extension enumerates unrelated user tabs");

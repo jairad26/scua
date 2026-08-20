@@ -17,6 +17,7 @@ export interface ChromeWorkspaceTab {
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+const PRECONNECT_RETRY_DELAYS_MS = [50, 150, 350, 750];
 const CHROME_WORKSPACE_ID = process.env.SCUA_CHROME_WORKSPACE_ID?.trim() || `scua-${randomUUID()}`;
 const CHROME_WORKSPACE_NAME = process.env.SCUA_CHROME_WORKSPACE_NAME?.trim() || "SCUA";
 
@@ -25,23 +26,35 @@ export function chromeExtensionSocketPath(): string {
 		|| path.join(os.homedir(), "Library", "Application Support", "SCUA", "chrome-bridge.sock");
 }
 
-export async function chromeExtensionRequest<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+function retryablePreconnectError(error: unknown): boolean {
+	const candidate = error as NodeJS.ErrnoException & { requestSent?: boolean };
+	return candidate.requestSent !== true && (candidate.code === "ECONNREFUSED" || candidate.code === "ENOENT");
+}
+
+async function chromeExtensionRequestOnce<T>(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<T> {
 	const id = randomUUID();
 	const socket = net.createConnection(chromeExtensionSocketPath());
 	return await new Promise<T>((resolve, reject) => {
 		let buffer = "";
 		let settled = false;
+		let requestSent = false;
 		const finish = (error?: Error, value?: T) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			socket.destroy();
-			if (error) reject(error);
+			if (error) {
+				(error as Error & { requestSent?: boolean }).requestSent = requestSent;
+				reject(error);
+			}
 			else resolve(value as T);
 		};
 		const timer = setTimeout(() => finish(new Error(`SCUA Chrome extension request '${method}' timed out after ${timeoutMs}ms.`)), timeoutMs);
 		socket.setEncoding("utf8");
-		socket.on("connect", () => socket.write(`${JSON.stringify({ type: "request", id, method, params })}\n`));
+		socket.on("connect", () => {
+			requestSent = true;
+			socket.write(`${JSON.stringify({ type: "request", id, method, params })}\n`);
+		});
 		socket.on("data", (chunk) => {
 			buffer += chunk;
 			while (buffer.includes("\n")) {
@@ -61,6 +74,18 @@ export async function chromeExtensionRequest<T>(method: string, params: Record<s
 			if (!settled) finish(new Error("SCUA Chrome extension bridge disconnected before replying."));
 		});
 	});
+}
+
+export async function chromeExtensionRequest<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			return await chromeExtensionRequestOnce<T>(method, params, timeoutMs);
+		} catch (error) {
+			const delayMs = PRECONNECT_RETRY_DELAYS_MS[attempt];
+			if (delayMs === undefined || !retryablePreconnectError(error)) throw error;
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+		}
+	}
 }
 
 export async function chromeExtensionAvailable(timeoutMs = 250): Promise<boolean> {

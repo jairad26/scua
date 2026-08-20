@@ -88,6 +88,36 @@ async function attach(tabId) {
   await chrome.debugger.sendCommand({ tabId }, "Page.enable");
 }
 
+async function waitForTabReady(tabId, timeoutMs = 15_000) {
+  const ready = (tab) => tab?.status === "complete" && typeof tab.url === "string" && tab.url.length > 0;
+  const current = await chrome.tabs.get(tabId);
+  if (ready(current)) return current;
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, tab) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      if (error) reject(error);
+      else resolve(tab);
+    };
+    const onUpdated = async (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || (changeInfo.status !== "complete" && !changeInfo.url)) return;
+      const latest = tab?.status === "complete" ? tab : await chrome.tabs.get(tabId).catch(() => undefined);
+      if (ready(latest)) finish(undefined, latest);
+    };
+    const onRemoved = (removedTabId) => {
+      if (removedTabId === tabId) finish(new Error(`SCUA tab ${tabId} closed before it became ready.`));
+    };
+    const timer = setTimeout(() => finish(new Error(`SCUA tab ${tabId} did not finish loading within ${timeoutMs}ms.`)), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.get(tabId).then((latest) => { if (ready(latest)) finish(undefined, latest); }).catch((error) => finish(error));
+  });
+}
+
 function requireWorkspaceId(params) {
   const workspaceId = typeof params?.workspaceId === "string" ? params.workspaceId.trim() : "";
   if (!workspaceId || workspaceId.length > 160) throw new Error("A bounded SCUA workspaceId is required.");
@@ -101,7 +131,7 @@ function workspaceColor(workspaceId) {
   return colors[hash % colors.length];
 }
 
-async function ensureWorkspaceTab(params = {}) {
+async function allocateWorkspaceTab(params = {}) {
   const workspaceId = requireWorkspaceId(params);
   const url = typeof params.url === "string" && params.url ? params.url : "about:blank";
   const workspaces = await allWorkspaces();
@@ -127,8 +157,6 @@ async function ensureWorkspaceTab(params = {}) {
   if (!Number.isInteger(tab?.id)) throw new Error("Chrome did not return the new SCUA tab ID.");
   workspace.ownedTabIds.add(tab.id);
   await saveRuntimeWorkspaces(workspaces);
-  await attach(tab.id);
-  const current = await chrome.tabs.get(tab.id);
   return {
     tabId: tab.id,
     targetId: `scua-extension-tab:${tab.id}`,
@@ -137,9 +165,20 @@ async function ensureWorkspaceTab(params = {}) {
     workspaceId,
     workspaceName: workspace.name,
     reusedWindow,
+    active: Boolean(tab.active),
+    title: tab.title ?? "",
+    url: tab.url ?? url,
+  };
+}
+
+async function finishWorkspaceTab(tab) {
+  const current = await waitForTabReady(tab.tabId);
+  await attach(tab.tabId);
+  return {
+    ...tab,
     active: Boolean(current.active),
     title: current.title ?? "",
-    url: current.url ?? url,
+    url: current.url ?? tab.url,
   };
 }
 
@@ -183,7 +222,12 @@ async function requireOwnedTab(params) {
 async function execute(message) {
   switch (message.method) {
     case "bridge.ping": return { ready: true };
-    case "workspace.ensureTab": return await mutateWorkspace(message.params, () => ensureWorkspaceTab(message.params));
+    case "workspace.ensureTab": {
+      // Serialize only the group/storage allocation. Page loading and debugger
+      // attachment can then proceed concurrently across independent tabs.
+      const tab = await mutateWorkspace(message.params, () => allocateWorkspaceTab(message.params));
+      return await finishWorkspaceTab(tab);
+    }
     case "workspace.listTabs": return await ownedTabs(message.params);
     case "workspace.close": return await mutateWorkspace(message.params, async () => {
       const workspaceId = requireWorkspaceId(message.params);

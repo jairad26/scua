@@ -629,12 +629,17 @@ export async function listCdpPageContexts(): Promise<CdpPageContext[]> {
 
 /** Create a tab in the existing Chrome SCUA group, falling back to managed Chromium. */
 export async function createCdpPageContext(url: string): Promise<CdpPageContext | undefined> {
-	if (await chromeExtensionAvailable()) {
+	try {
 		const tab = await chromeExtensionEnsureTab(url);
 		extensionWorkspaceTabs.set(tab.targetId, tab);
 		return { contextId: cdpContextId(tab.targetId), targetId: tab.targetId, title: tab.title, url: tab.url || url, workspace: workspaceMetadata({ id: tab.targetId, type: "page", title: tab.title, url: tab.url, extensionTabId: tab.tabId }) };
+	} catch (error) {
+		if (process.env.SCUA_DEBUG_CHROME_EXTENSION === "1") console.error("SCUA Chrome extension tab creation failed:", error);
+		// Once bytes may have reached the companion, falling back could create a
+		// duplicate tab. Propagate uncertainty instead of replaying elsewhere.
+		if ((error as Error & { requestSent?: boolean }).requestSent === true) throw error;
 	}
-	return await createManagedCdpPageContext(url);
+	return await createManagedCdpPageContext(url).catch(() => undefined);
 }
 
 /** Create a tab only through the configured direct-debugging endpoint. */
