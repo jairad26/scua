@@ -30,6 +30,9 @@ element, and action model.
 - `execute_plan` (MCP coordinator)
 - `read_text`
 - `wait_for`
+- `subscribe_ui`
+- `read_ui_events`
+- `unsubscribe_ui`
 
 SCUA's launcher enables visual agent cursors and defaults to `background`
 execution mode. It uses semantic Accessibility actions or process-targeted
@@ -65,6 +68,15 @@ guards immediately before admitting each mutation, and refreshes only a
 conflicting branch within a strict retry budget. It never retries an action
 whose delivery may already have occurred. This remains a lowest-common-
 denominator UI primitive rather than one tool per application.
+
+Long-lived orchestrators can replace observation polling with durable UI
+subscriptions. `subscribe_ui` binds a native Accessibility or browser DOM
+notification source to an actor-owned resource and immutable baseline;
+`read_ui_events` resumes from an opaque cursor and performs one authoritative
+semantic refresh before returning any changed successor state. Event buffers
+are bounded with explicit overflow recovery. Every event carries stable actor,
+resource, epoch, and trace identity for delivery-safe deduplication. Cancelling
+a pending read, release, handoff, or actor close terminates its stream.
 
 See [SCUA architecture](docs/scua-architecture.md) for the fork-specific design
 and search decisions. The concrete reliability, performance, and

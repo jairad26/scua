@@ -231,6 +231,32 @@ export const mcpTools: McpToolDefinition[] = [
 		object({ stateId, ...conditionProperties }, ["stateId"]),
 		true,
 	),
+	tool(
+		"subscribe_ui",
+		"Subscribe to UI changes",
+		"Create an actor-owned, request-independent subscription from an immutable UI state. Native Accessibility and browser DOM notifications wake the stream; every delivered change is followed by an authoritative semantic observation.",
+		object({ stateId, label: string("Optional caller label for diagnostics."), ...conditionProperties }, ["stateId"]),
+		false,
+	),
+	tool(
+		"read_ui_events",
+		"Read UI events",
+		"Long-read a durable UI subscription from an opaque resume cursor. Returns bounded events, an explicit overflow signal, the next cursor, and a fresh successor state after changes.",
+		object({
+			subscriptionId: string("Subscription returned by subscribe_ui."),
+			cursor: string("Opaque cursor returned by subscribe_ui or a prior read_ui_events call."),
+			timeoutMs: number("Long-read timeout.", { minimum: 0, maximum: 60_000, default: 30_000 }),
+			maxEvents: number("Maximum events to return.", { minimum: 1, maximum: 128, default: 64 }),
+		}, ["subscriptionId", "cursor"]),
+		true,
+	),
+	tool(
+		"unsubscribe_ui",
+		"Unsubscribe from UI changes",
+		"Close one actor-owned UI subscription and stop its native/browser event pump.",
+		object({ subscriptionId: string("Subscription returned by subscribe_ui.") }, ["subscriptionId"]),
+		false,
+	),
 ];
 
 export const mcpToolNames = mcpTools.map((definition) => definition.name);

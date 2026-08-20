@@ -10,7 +10,7 @@ import type { PlatformDiagnostics } from "../types.ts";
 import { resolveMacosHelperAppPath } from "./helper-path.mjs";
 
 const COMMAND_TIMEOUT_MS = 15_000;
-const HELPER_PROTOCOL_VERSION = 14;
+const HELPER_PROTOCOL_VERSION = 15;
 const HELPER_SETUP_TIMEOUT_MS = 60_000;
 
 export const HELPER_BUNDLE_ID = "com.injaneity.pi-computer-use";
@@ -316,6 +316,12 @@ export class MacosHelperClient {
 					windowLimit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.windowLimit, 0))),
 					elements: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.elements, 0))),
 					elementLimit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.refs?.elementLimit, 0))),
+				},
+				uiEvents: {
+					observers: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.uiEvents?.observers, 0))),
+					observerLimit: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.uiEvents?.observerLimit, 0))),
+					events: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.uiEvents?.events, 0))),
+					eventLimitPerObserver: Math.max(0, Math.trunc(toFiniteNumber(result?.retention?.uiEvents?.eventLimitPerObserver, 0))),
 				},
 			},
 		};

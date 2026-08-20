@@ -17,6 +17,8 @@ surface; it is not a permanent allowlist.
 | Spotify native app | Electron search textbox replacement through generic AX/PID events, result discovery outside the input, and clear | Yes (`pid`), without focus transfer | Result content for `Raga of Madness`, not merely an echoed field value | 0.19 s observation; 0.28 s checked search action |
 | Spotify semantic-index torture run | Initial AX slice forced to 100 nodes; a target absent from that slice was discovered by continuation, then every live frontier was exhausted | Observation only | `search_ui` returned the target from a fresh immutable state; final index reported complete | Match at 208 indexed nodes in 0.20 s; complete at 524 nodes, 0 pending frontiers |
 | App Store custom surface | Search-field value, Return submit, result discovery outside the input, and clear | AX value plus foreground Return commit | `Notion` result appears outside the search field | 0.58 s observation; included in the four-app 8.75 s parallel run |
+| Managed Chromium subscription | DOM notification, conditioned long-read, authoritative successor, cursor resume, cancellation, and handoff fencing | Background CDP observation only | `Ready: changed` present in the successor AX tree | 0.72–0.74 s including an intentional 0.75 s fixture timer |
+| Calculator subscription | AX notification burst coalescing and authoritative successor observation | Background AX observation only | New immutable state after semantic button press | 0.09–0.10 s event delivery and refresh |
 
 The native concurrency run used three processes and measured 2.92× overlap.
 The physical pointer moved exactly 0 px, the foreground Chrome PID/window was
@@ -56,6 +58,7 @@ npm run test:logical-actors-live
 npm run test:multi-agent-live
 npm run test:same-app-windows-live
 npm run test:cancellation-live
+npm run test:subscriptions-live
 npm run test:real-app-mutations-live
 npm run soak:orchestrator-live
 ```

@@ -27,6 +27,9 @@ resource isolation, checked mutation, cancellation, handoff, and evidence.
   concurrent request handling, and bounded look/ref retention.
 - Agent cursors are independent of the physical pointer and carry a live app
   badge that follows the actor between applications.
+- Durable native/browser UI subscriptions expose opaque resume cursors,
+  bounded overflow, authoritative successor states, cancellation, and
+  ownership-fenced terminal events without observation polling.
 
 ## Release gates
 
@@ -40,6 +43,7 @@ These are executable product gates rather than duplicate implementation lists.
 | Real-app compatibility | Notes create/edit/delete, Calendar create/verify/cleanup, and Spotify Electron search/result verification | `npm run test:real-app-mutations-live` |
 | Large native trees | Initial AX walk has a 1.5-second latency budget and explicit resumable frontiers; exhaustive search remains available | `npm run test:semantic-index-live` |
 | 50-actor endurance | Full 60-minute run passed with 50 managed targets and claims, continuous five-second mutation rounds, zero residual mutations, 39 MB peak RSS growth, 16 peak descriptor growth, bounded events, and helper look eviction stable at 512/512 | `npm run soak:orchestrator-live` |
+| Durable UI subscriptions | Browser condition delivery, native AX delivery, cursor resume, cancellation, and handoff fencing are black-box verified | `npm run test:subscriptions-live` |
 | Established benchmarks | OSWorld adapter/pilot is local; MacAgentBench requires its external checkout and benchmark environment | `npm run benchmark:pilot` |
 
 Release evidence must distinguish delivery, semantic verification, and an
@@ -64,12 +68,10 @@ cursor is not by itself proof that the requested outcome occurred.
 1. [Run and publish established benchmark scores](https://github.com/jairad26/scua/issues/2)
    from provisioned OSWorld and MacAgentBench environments; do not substitute
    custom fixtures for those scores.
-2. [Add durable external change-event subscriptions](https://github.com/jairad26/scua/issues/3)
-   so orchestrators can await UI/resource changes without polling.
-3. [Expand the compatibility matrix](https://github.com/jairad26/scua/issues/4)
+2. [Expand the compatibility matrix](https://github.com/jairad26/scua/issues/4)
    across macOS releases and more custom-rendered/Electron applications,
    preserving generic primitives and external outcome checks.
-4. Bring newer generic primitives and equivalent black-box gates to Windows
+3. Bring newer generic primitives and equivalent black-box gates to Windows
    and Linux after the macOS product loop is stable.
 
 ## Non-goals

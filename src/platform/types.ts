@@ -30,6 +30,7 @@ export interface PlatformDiagnostics {
 	retention?: {
 		looks?: { records: number; limit: number };
 		refs?: { windows: number; windowLimit: number; elements: number; elementLimit: number };
+		uiEvents?: { observers: number; observerLimit: number; events: number; eventLimitPerObserver: number };
 	};
 }
 
@@ -219,6 +220,34 @@ export interface PlatformWaitForResponse {
 	nodeCount?: number;
 }
 
+export interface PlatformUiEventCursorRequest extends PlatformTarget {}
+
+export interface PlatformUiEventCursorResponse {
+	cursor: number;
+	earliestCursor: number;
+	latestCursor: number;
+}
+
+export interface PlatformUiEvent {
+	sequence: number;
+	timestamp: number;
+	notification: string;
+}
+
+export interface PlatformReadUiEventsRequest extends PlatformTarget {
+	cursor: number;
+	timeoutMs: number;
+	maxEvents: number;
+}
+
+export interface PlatformReadUiEventsResponse {
+	events: PlatformUiEvent[];
+	cursor: number;
+	earliestCursor: number;
+	latestCursor: number;
+	overflow: boolean;
+}
+
 export interface ComputerUsePlatformBackend {
 	name: PlatformName;
 	/** Release process-local resources when the Pi session is torn down. */
@@ -235,6 +264,8 @@ export interface ComputerUsePlatformBackend {
 	actBatch?(requests: PlatformActRequest[], options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<HelperActResult>;
 	readText(args: PlatformReadTextRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadTextResponse>;
 	waitFor(args: PlatformWaitForRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformWaitForResponse>;
+	uiEventCursor?(args: PlatformUiEventCursorRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformUiEventCursorResponse>;
+	readUiEvents?(args: PlatformReadUiEventsRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadUiEventsResponse>;
 	isBrowserApp(appName: string, bundleId?: string): boolean;
 	isChromeFamilyApp(appName: string, bundleId?: string): boolean;
 	openBrowserLocation(target: { appName: string; bundleId?: string }, url: string, signal?: AbortSignal): Promise<boolean>;

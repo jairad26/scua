@@ -12,7 +12,7 @@ import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputer
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
 import { foldToBudget, graftScopedOutline, nodeByRef, outlineNodeLabel, outlineNodePath, rankedTextMatch, restoreOutline, searchOutline, searchOutlineRanked, serializeOutline, serializeOutlineNodeShallow, serializeOutlineSearchMatch, type LookResponse, type Outline, type OutlineChange, type OutlineNode, type OutlineSearchMatch, type SerializedOutline, type SerializedOutlineNode, type SerializedOutlineSearchMatch } from "./outline.ts";
 import { applyOutputEnvelope, boundToolError, clearStoredOutputs, readStoredOutput, UI_TEXT_PAGE_CHARS } from "./output.ts";
-import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type RootSelector, type SearchUiParams, type UiAction, type UiCondition, type WaitForParams } from "./contract.ts";
+import { AGENT_TOOL_NAMES, type ActParams, type EvaluateBrowserParams, type ExpandUiParams, type ImageMode, type InspectUiParams, type LaunchBrowserParams, type FindParams, type NavigateBrowserParams, type ObserveParams, type ObserveTargetParams, type ReadTextParams, type ReadUiEventsParams, type RootSelector, type SearchUiParams, type SubscribeUiParams, type UiAction, type UiCondition, type UnsubscribeUiParams, type WaitForParams } from "./contract.ts";
 import { toFiniteNumber } from "./platform/coerce.ts";
 import { currentPlatformBackend } from "./platform/index.ts";
 import type { FramePoints, HelperActPerformed, HelperActResult, NativeInputDelivery, PlatformActRequest, PlatformApp as HelperApp, PlatformDiagnostics, PlatformFrontmostResult as FrontmostResult, PlatformRoot as HelperWindow } from "./platform/types.ts";
@@ -20,11 +20,19 @@ import type { PermissionStatus } from "./permissions.ts";
 import { ResourceScheduler, StaleResourceStateError } from "./runtime.ts";
 import { rebindActParams } from "./rebind.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
-import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState } from "./state.ts";
-import { claimCurrentActorResource, currentActorId, withCurrentActorMutation } from "./control-plane.ts";
+import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState, type UiObservation } from "./state.ts";
+import type { StoredState } from "./runtime.ts";
+import { claimCurrentActorResource, currentActor, currentActorId, scuaControlPlane, withCurrentActorMutation } from "./control-plane.ts";
 import { assertUserQuietPeriod, UserActiveError, waitForUserQuietPeriod, type UserActivitySnapshot } from "./user-activity.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
-export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, RootSelector, SearchUiParams, StateTargetParams, UiAction, WaitForParams } from "./contract.ts";
+import {
+	INACTIVE_UI_SUBSCRIPTION_RETENTION_MS,
+	MAX_UI_EVENTS_PER_SUBSCRIPTION,
+	UiSubscriptionStore,
+	type UiSubscriptionEvent,
+	type UiSubscriptionRecord,
+} from "./ui-subscriptions.ts";
+export type { ActParams, EvaluateBrowserParams, ExpandUiParams, ImageMode, InspectUiParams, LaunchBrowserParams, FindParams, MouseButtonName, NavigateBrowserParams, ObserveParams, ObserveTargetParams, ReadTextParams, ReadUiEventsParams, RootSelector, SearchUiParams, StateTargetParams, SubscribeUiParams, UiAction, UnsubscribeUiParams, WaitForParams } from "./contract.ts";
 
 interface ActivationFlags {
 	activated: boolean;
@@ -239,6 +247,45 @@ interface WaitForDetails {
 	renderedOutline: string;
 }
 
+interface SubscribeUiDetails {
+	tool: "subscribe_ui";
+	subscriptionId: string;
+	cursor: string;
+	stateId: string;
+	resource: { key: string; epoch: number; actorId: string };
+	source: "native_ax" | "browser_dom";
+	condition?: UiCondition;
+	conditionSatisfied?: boolean;
+	lease: { leaseId: string; generation: number; expiresAt: number };
+	retention: { maxEvents: number; inactiveExpiresAfterMs: number };
+}
+
+interface ReadUiEventsDetails {
+	tool: "read_ui_events";
+	subscriptionId: string;
+	events: UiSubscriptionEvent[];
+	nextCursor: string;
+	overflow: boolean;
+	hasMore: boolean;
+	timedOut: boolean;
+	active: boolean;
+	terminalReason?: string;
+	stateId: string;
+	baseStateId?: string;
+	view?: "full" | "diff";
+	changes?: OutlineChange[];
+	conditionSatisfied?: boolean;
+	resource: { key: string; epoch: number; actorId: string };
+	retention: { maxEvents: number; inactiveExpiresAfterMs: number };
+}
+
+interface UnsubscribeUiDetails {
+	tool: "unsubscribe_ui";
+	subscriptionId: string;
+	closed: true;
+	reason: string;
+}
+
 interface OutlineToolDetails {
 	tool: "search_ui" | "expand_ui" | "inspect_ui";
 	stateId?: string;
@@ -356,6 +403,14 @@ const runtimeState: RuntimeState = {
 const savedStates = new SavedStates();
 let resourceScheduler = new ResourceScheduler();
 const semanticIndexes = new Map<string, SemanticIndexRecord>();
+const uiSubscriptions = new UiSubscriptionStore();
+const uiSubscriptionBaselines = new Map<string, StoredState<UiObservation>>();
+const uiSubscriptionPumps = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+
+type UiSubscriptionRuntimeSource =
+	| { kind: "native_ax"; target: CurrentTarget }
+	| { kind: "browser_dom"; contextId: string };
+const uiSubscriptionSources = new Map<string, UiSubscriptionRuntimeSource>();
 
 function operationState(): OperationState {
 	return savedStates.current();
@@ -370,6 +425,130 @@ function persistOperation(state: OperationState): void {
 	const resourceKey = state.resourceKey ?? desktopResourceKey(state.currentTarget);
 	const epoch = state.epoch ?? resourceScheduler.epoch(resourceKey);
 	savedStates.saveDesktop(state, resourceKey, epoch);
+}
+
+function stopUiSubscriptionPump(subscriptionId: string): void {
+	uiSubscriptionPumps.get(subscriptionId)?.controller.abort();
+	uiSubscriptionPumps.delete(subscriptionId);
+	uiSubscriptionSources.delete(subscriptionId);
+}
+
+function closeAllUiSubscriptionPumps(): void {
+	uiSubscriptions.closeAll("session_shutdown");
+	for (const subscriptionId of uiSubscriptionPumps.keys()) stopUiSubscriptionPump(subscriptionId);
+	uiSubscriptionBaselines.clear();
+}
+
+function renewUiSubscriptionLease(record: UiSubscriptionRecord): void {
+	if (!record.active || record.leaseExpiresAt - Date.now() > 60_000) return;
+	const renewed = scuaControlPlane.renewOwnedResource(record.actorId, record.resourceKey, record.leaseId, 5 * 60_000);
+	record.leaseGeneration = renewed.generation;
+	record.leaseExpiresAt = renewed.expiresAt;
+}
+
+async function pumpNativeUiSubscription(record: UiSubscriptionRecord, target: CurrentTarget, signal: AbortSignal): Promise<void> {
+	if (!currentPlatformBackend.readUiEvents) throw new Error(`Platform '${currentPlatformBackend.name}' does not expose native UI change notifications.`);
+	while (record.active && !signal.aborted) {
+		renewUiSubscriptionLease(record);
+		const fromCursor = record.sourceCursor;
+		let cursor = fromCursor;
+		let earliestCursor = cursor;
+		let latestCursor = cursor;
+		let overflow = false;
+		const events: Array<{ notification: string }> = [];
+		for (let batch = 0; batch < 4; batch += 1) {
+			const result = await currentPlatformBackend.readUiEvents({
+				...nativeWindowRequest(target),
+				cursor,
+				timeoutMs: batch === 0 ? 4_000 : 0,
+				maxEvents: 128,
+			}, { timeoutMs: batch === 0 ? 6_000 : 2_000, signal });
+			cursor = result.cursor;
+			earliestCursor = result.earliestCursor;
+			latestCursor = result.latestCursor;
+			overflow ||= result.overflow;
+			events.push(...result.events);
+			if (result.events.length === 0) break;
+			if (batch === 0) await sleep(35, signal);
+		}
+		if (overflow) {
+			uiSubscriptions.append(record.subscriptionId, "overflow", {
+				source: "native_ax",
+				requestedCursor: fromCursor,
+				earliestCursor,
+				latestCursor,
+			}, resourceScheduler.epoch(record.resourceKey));
+		}
+		if (events.length > 0) {
+			uiSubscriptions.append(record.subscriptionId, "ui_changed", {
+				source: "native_ax",
+				fromCursor,
+				toCursor: cursor,
+				notifications: [...new Set(events.map((event) => event.notification))],
+				nativeEventCount: events.length,
+			}, resourceScheduler.epoch(record.resourceKey));
+		}
+		record.sourceCursor = cursor;
+	}
+}
+
+async function pumpBrowserUiSubscription(record: UiSubscriptionRecord, contextId: string, signal: AbortSignal): Promise<void> {
+	while (record.active && !signal.aborted) {
+		renewUiSubscriptionLease(record);
+		const before = record.sourceCursor;
+		const next = await cdpWaitForMutationForContext(contextId, before, 4_000, signal);
+		if (next === undefined) throw new Error(`Browser root '${contextId}' closed while its UI subscription was active.`);
+		if (next !== before) {
+			record.sourceCursor = next;
+			uiSubscriptions.append(record.subscriptionId, "ui_changed", {
+				source: "browser_dom",
+				fromGeneration: before,
+				toGeneration: next,
+			}, resourceScheduler.epoch(record.resourceKey));
+		}
+	}
+}
+
+function startUiSubscriptionPump(record: UiSubscriptionRecord, source: UiSubscriptionRuntimeSource): void {
+	const controller = new AbortController();
+	uiSubscriptionSources.set(record.subscriptionId, source);
+	const promise = (source.kind === "browser_dom"
+		? pumpBrowserUiSubscription(record, source.contextId, controller.signal)
+		: pumpNativeUiSubscription(record, source.target, controller.signal))
+		.catch((error) => {
+			if (controller.signal.aborted) return;
+			uiSubscriptions.append(record.subscriptionId, "source_error", {
+				message: error instanceof Error ? error.message : String(error),
+			});
+			uiSubscriptions.close(record.subscriptionId, record.actorId, "source_error");
+		})
+		.finally(() => {
+			uiSubscriptionPumps.delete(record.subscriptionId);
+			uiSubscriptionSources.delete(record.subscriptionId);
+		});
+	uiSubscriptionPumps.set(record.subscriptionId, { controller, promise });
+}
+
+export function invalidateUiSubscriptionsForResource(resourceKey: string, actorId: string, reason: string, details?: Record<string, unknown>): string[] {
+	const invalidated = uiSubscriptions.invalidateResource(resourceKey, actorId, reason, details);
+	for (const subscriptionId of invalidated) {
+		stopUiSubscriptionPump(subscriptionId);
+		uiSubscriptionBaselines.delete(subscriptionId);
+	}
+	return invalidated;
+}
+
+export function closeUiSubscriptionsForActor(actorId: string, reason = "actor_closed"): string[] {
+	const closed = uiSubscriptions.closeActor(actorId, reason);
+	for (const subscriptionId of closed) {
+		stopUiSubscriptionPump(subscriptionId);
+		uiSubscriptionBaselines.delete(subscriptionId);
+	}
+	return closed;
+}
+
+export function uiSubscriptionDiagnostics(): ReturnType<UiSubscriptionStore["diagnostics"]> {
+	return uiSubscriptions.diagnostics();
 }
 
 function semanticIndexKey(actorId: string, resourceKey: string): string {
@@ -524,6 +703,7 @@ function adoptSemanticIndex(state: OperationState, index: SemanticIndexRecord): 
 
 /** Release handles and state owned by the current Pi session. */
 export async function shutdownComputerUseSession(): Promise<void> {
+	closeAllUiSubscriptionPumps();
 	for (const index of semanticIndexes.values()) index.cancelled = true;
 	semanticIndexes.clear();
 	await resourceScheduler.close();
@@ -2132,6 +2312,182 @@ async function performWaitFor(params: WaitForParams, signal?: AbortSignal): Prom
 	return { content: [{ type: "text", text: `${message}\n${viewText}` }], details };
 }
 
+function subscriptionCondition(params: SubscribeUiParams): UiCondition | undefined {
+	if (!trimOrUndefined(params.text) && !trimOrUndefined(params.role) && !trimOrUndefined(params.value)) return undefined;
+	const condition: UiCondition = {
+		...(trimOrUndefined(params.ref) ? { ref: trimOrUndefined(params.ref) } : {}),
+		...(trimOrUndefined(params.scopeRef) ? { scopeRef: trimOrUndefined(params.scopeRef) } : {}),
+		...(trimOrUndefined(params.text) ? { text: trimOrUndefined(params.text) } : {}),
+		...(trimOrUndefined(params.role) ? { role: trimOrUndefined(params.role) } : {}),
+		...(trimOrUndefined(params.value) ? { value: trimOrUndefined(params.value) } : {}),
+		until: params.until === "absent" ? "absent" : "present",
+	};
+	validateCondition(condition);
+	conditionScopeNode(operationState().currentOutline!, validateCondition(condition));
+	return condition;
+}
+
+function subscriptionConditionSatisfied(condition: UiCondition | undefined, outline: Outline | undefined = operationState().currentOutline): boolean | undefined {
+	if (!condition) return undefined;
+	if (!outline) return false;
+	const validated = validateCondition(condition);
+	return outlineConditionPresent(outline, validated) !== validated.gone;
+}
+
+async function performSubscribeUi(params: SubscribeUiParams, signal?: AbortSignal): Promise<AgentToolResult<SubscribeUiDetails>> {
+	const state = operationState();
+	const stateId = state.currentCapture?.stateId ?? state.browserSnapshot?.snapshotId;
+	if (!stateId || !state.resourceKey || state.epoch === undefined || !state.currentOutline) {
+		throw new Error("subscribe_ui requires a complete immutable UI state. Call observe_ui first.");
+	}
+	const condition = subscriptionCondition(params);
+	const conditionSatisfied = subscriptionConditionSatisfied(condition);
+	const lease = scuaControlPlane.acquire(currentActor(), state.resourceKey, 5 * 60_000);
+	let source: UiSubscriptionRuntimeSource;
+	let sourceCursor: number;
+	if (isBrowserContextId(state.contextId)) {
+		source = { kind: "browser_dom", contextId: state.contextId };
+		const generation = await cdpMutationGenerationForContext(state.contextId);
+		if (generation === undefined) throw new Error(`Browser root '${state.contextId}' is unavailable for UI subscriptions.`);
+		sourceCursor = generation;
+	} else {
+		if (!state.currentTarget || !currentPlatformBackend.uiEventCursor) {
+			throw new Error(`Platform '${currentPlatformBackend.name}' does not expose durable native UI change notifications.`);
+		}
+		source = { kind: "native_ax", target: { ...state.currentTarget } };
+		const cursor = await currentPlatformBackend.uiEventCursor(nativeWindowRequest(state.currentTarget), { signal, timeoutMs: 5_000 });
+		sourceCursor = cursor.cursor;
+	}
+	const created = uiSubscriptions.create({
+		actorId: currentActorId(),
+		resourceKey: state.resourceKey,
+		resourceEpoch: state.epoch,
+		leaseId: lease.leaseId,
+		leaseGeneration: lease.generation,
+		leaseExpiresAt: lease.expiresAt,
+		stateId,
+		source: source.kind,
+		sourceCursor,
+		condition,
+		conditionSatisfied,
+		label: trimOrUndefined(params.label),
+	});
+	const baseline = savedStates.get(stateId);
+	if (baseline) uiSubscriptionBaselines.set(created.record.subscriptionId, structuredClone(baseline));
+	startUiSubscriptionPump(created.record, source);
+	const details: SubscribeUiDetails = {
+		tool: "subscribe_ui",
+		subscriptionId: created.record.subscriptionId,
+		cursor: created.cursor,
+		stateId,
+		resource: { key: state.resourceKey, epoch: state.epoch, actorId: currentActorId() },
+		source: source.kind,
+		condition,
+		conditionSatisfied,
+		lease: { leaseId: lease.leaseId, generation: lease.generation, expiresAt: lease.expiresAt },
+		retention: { maxEvents: MAX_UI_EVENTS_PER_SUBSCRIPTION, inactiveExpiresAfterMs: INACTIVE_UI_SUBSCRIPTION_RETENTION_MS },
+	};
+	return {
+		content: [{ type: "text", text: `Subscribed ${created.record.subscriptionId} to ${source.kind} changes for ${state.resourceKey}. Resume with the returned cursor.` }],
+		details,
+	};
+}
+
+function successorObservation(result: AgentToolResult<ComputerUseDetails | BrowserObservationDetails>): {
+	stateId: string;
+	epoch: number;
+	view: "full" | "diff";
+	changes?: OutlineChange[];
+} {
+	const details = result.details;
+	if ("capture" in details) {
+		return { stateId: details.capture.stateId, epoch: details.resource.epoch, view: details.view, changes: details.changes };
+	}
+	return { stateId: details.stateId, epoch: details.resource.epoch, view: details.view, changes: details.changes };
+}
+
+async function performReadUiEvents(params: ReadUiEventsParams, signal?: AbortSignal): Promise<AgentToolResult<ReadUiEventsDetails>> {
+	const actorId = currentActorId();
+	let record = uiSubscriptions.get(params.subscriptionId, actorId);
+	if (record.active) {
+		try {
+			const renewed = scuaControlPlane.renew(currentActor(), record.resourceKey, record.leaseId, 5 * 60_000);
+			record.leaseGeneration = renewed.generation;
+			record.leaseExpiresAt = renewed.expiresAt;
+		} catch (error) {
+			invalidateUiSubscriptionsForResource(record.resourceKey, actorId, "lease_lost", { message: error instanceof Error ? error.message : String(error) });
+			record = uiSubscriptions.get(params.subscriptionId, actorId);
+		}
+	}
+	const timeoutMs = Math.max(0, Math.min(60_000, Math.trunc(params.timeoutMs ?? 30_000)));
+	const maxEvents = Math.max(1, Math.min(128, Math.trunc(params.maxEvents ?? 64)));
+	const deadline = Date.now() + timeoutMs;
+	let waitCursor = params.cursor;
+	const baseStateId = record.stateId;
+	let view: "full" | "diff" | undefined;
+	let changes: OutlineChange[] | undefined;
+	let resourceEpoch = resourceScheduler.epoch(record.resourceKey);
+	while (!(record.condition && record.conditionSatisfied)) {
+		await uiSubscriptions.waitForEvents(params.subscriptionId, actorId, waitCursor, Math.max(0, deadline - Date.now()), signal);
+		const pending = uiSubscriptions.read(params.subscriptionId, actorId, waitCursor, maxEvents);
+		const shouldRefresh = record.active && (pending.overflow || pending.events.some((event) => event.type === "ui_changed" || event.type === "overflow"));
+		if (shouldRefresh) {
+			const observed = await performObserve({ stateId: record.stateId, mode: "semantic" }, signal);
+			const successor = successorObservation(observed);
+			record.stateId = successor.stateId;
+			record.resourceEpoch = successor.epoch;
+			resourceEpoch = successor.epoch;
+			view = successor.view;
+			changes = successor.changes;
+			const refreshedOutline = observed.details.outline ? restoreOutline(observed.details.outline) : operationState().currentOutline;
+			const satisfied = subscriptionConditionSatisfied(record.condition, refreshedOutline);
+			if (record.condition && satisfied && record.conditionSatisfied !== true) {
+				uiSubscriptions.append(record.subscriptionId, "condition_met", {
+					condition: record.condition,
+					stateId: successor.stateId,
+				}, resourceEpoch);
+			}
+			record.conditionSatisfied = satisfied;
+		}
+		if (!record.condition || record.conditionSatisfied || !record.active || Date.now() >= deadline || pending.events.length === 0) break;
+		waitCursor = pending.nextCursor;
+	}
+	const read = uiSubscriptions.read(params.subscriptionId, actorId, params.cursor, maxEvents);
+	const timedOut = record.condition ? record.conditionSatisfied !== true && Date.now() >= deadline : read.events.length === 0;
+	const details: ReadUiEventsDetails = {
+		tool: "read_ui_events",
+		subscriptionId: record.subscriptionId,
+		events: read.events,
+		nextCursor: read.nextCursor,
+		overflow: read.overflow,
+		hasMore: read.hasMore,
+		timedOut,
+		active: record.active,
+		terminalReason: record.terminalReason,
+		stateId: record.stateId,
+		baseStateId: record.stateId !== baseStateId ? baseStateId : undefined,
+		view,
+		changes,
+		conditionSatisfied: record.conditionSatisfied,
+		resource: { key: record.resourceKey, epoch: resourceEpoch, actorId },
+		retention: { maxEvents: MAX_UI_EVENTS_PER_SUBSCRIPTION, inactiveExpiresAfterMs: INACTIVE_UI_SUBSCRIPTION_RETENTION_MS },
+	};
+	const summary = read.events.length > 0
+		? `Read ${read.events.length} UI event${read.events.length === 1 ? "" : "s"} from ${record.subscriptionId}; successor state ${record.stateId}.`
+		: `No UI events arrived for ${record.subscriptionId} within ${timeoutMs}ms.`;
+	return { content: [{ type: "text", text: summary }], details };
+}
+
+async function performUnsubscribeUi(params: UnsubscribeUiParams): Promise<AgentToolResult<UnsubscribeUiDetails>> {
+	const record = uiSubscriptions.close(params.subscriptionId, currentActorId(), "unsubscribed");
+	stopUiSubscriptionPump(record.subscriptionId);
+	uiSubscriptionBaselines.delete(record.subscriptionId);
+	return {
+		content: [{ type: "text", text: `Closed UI subscription ${record.subscriptionId}.` }],
+		details: { tool: "unsubscribe_ui", subscriptionId: record.subscriptionId, closed: true, reason: "unsubscribed" },
+	};
+}
+
 function sameRootIdentity(a: CurrentTarget, b: CurrentTarget): boolean {
 	if (a.pid !== b.pid) return false;
 	if (a.nativeWindowRef && b.nativeWindowRef) return a.nativeWindowRef === b.nativeWindowRef;
@@ -3111,6 +3467,8 @@ function makeToolExecutor<P, D>(tool: string, perform: (params: P, signal?: Abor
 export const executeFind = makeToolExecutor("find_roots", performListWindows);
 export const executeReadText = makeToolExecutor("read_text", performReadText);
 export const executeWaitFor = makeToolExecutor("wait_for", performWaitFor);
+export const executeSubscribeUi = makeToolExecutor("subscribe_ui", performSubscribeUi);
+export const executeUnsubscribeUi = makeToolExecutor("unsubscribe_ui", performUnsubscribeUi);
 export const executeObserve = makeToolExecutor("observe_ui", performObserve);
 export const executeSearchUi = makeToolExecutor("search_ui", performSearchUi);
 export const executeExpandUi = makeToolExecutor("expand_ui", performExpandUi);
@@ -3119,6 +3477,36 @@ export const executeAct = makeToolExecutor<ActParams, ComputerUseDetails | Termi
 export const executeNavigateBrowser = makeToolExecutor("navigate_browser", performNavigateBrowser);
 export const executeEvaluateBrowser = makeToolExecutor("evaluate_browser", performEvaluateBrowser);
 export const executeLaunchBrowser = makeToolExecutor("launch_browser", performLaunchBrowser);
+
+export const executeReadUiEvents = async (
+	_toolCallId: string,
+	params: ReadUiEventsParams,
+	signal: AbortSignal | undefined,
+	_onUpdate: AgentToolUpdateCallback<ReadUiEventsDetails> | undefined,
+	ctx: ExtensionContext,
+): Promise<AgentToolResult<ReadUiEventsDetails>> => {
+	try {
+		const record = uiSubscriptions.get(params.subscriptionId, currentActorId());
+		const retained = uiSubscriptionBaselines.get(record.subscriptionId);
+		if (!savedStates.get(record.stateId) && retained?.stateId === record.stateId) savedStates.set(structuredClone(retained));
+		const stateId = record.active ? record.stateId : undefined;
+		const result = applyOutputEnvelope("read_ui_events", await executeTool(ctx, { ...params, ...(stateId ? { stateId } : {}) }, signal, () => performReadUiEvents(params, signal)));
+		const refreshed = savedStates.get(record.stateId);
+		if (refreshed) uiSubscriptionBaselines.set(record.subscriptionId, structuredClone(refreshed));
+		return result;
+	} catch (error) {
+		if (signal?.aborted) {
+			try {
+				const record = uiSubscriptions.close(params.subscriptionId, currentActorId(), "cancelled");
+				stopUiSubscriptionPump(record.subscriptionId);
+				uiSubscriptionBaselines.delete(record.subscriptionId);
+			} catch {
+				// Cancellation is already delivery-safe even if another terminal transition won the race.
+			}
+		}
+		throw boundToolError("read_ui_events", error);
+	}
+};
 
 export function reconstructStateFromBranch(ctx: ExtensionContext): void {
 	savedStates.clear();

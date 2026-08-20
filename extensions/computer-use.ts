@@ -13,6 +13,9 @@ import {
 	executeReadText,
 	executeSearchUi,
 	executeWaitFor,
+	executeSubscribeUi,
+	executeReadUiEvents,
+	executeUnsubscribeUi,
 	reconstructStateFromBranch,
 	shutdownComputerUseSession,
 } from "../src/bridge.ts";
@@ -146,6 +149,41 @@ const waitForTool = defineTool({
 	execute: executeWaitFor,
 });
 
+const subscribeUiTool = defineTool({
+	name: "subscribe_ui",
+	label: "Subscribe to UI",
+	description: "Create a request-independent native/browser UI-change subscription from an immutable state.",
+	promptSnippet: "Use when an orchestrator should react to future UI changes without polling observations.",
+	parameters: Type.Object({
+		stateId,
+		label: Type.Optional(Type.String({ description: "Optional caller label", maxLength: 256 })),
+		...conditionProperties,
+	}),
+	execute: executeSubscribeUi,
+});
+
+const readUiEventsTool = defineTool({
+	name: "read_ui_events",
+	label: "Read UI Events",
+	description: "Long-read a UI subscription from an opaque resume cursor and return a fresh successor state after changes.",
+	promptSnippet: "Reuse nextCursor exactly; overflow forces an authoritative refresh automatically.",
+	parameters: Type.Object({
+		subscriptionId: Type.String({ maxLength: 128 }),
+		cursor: Type.String({ maxLength: 1024 }),
+		timeoutMs: Type.Optional(Type.Number({ minimum: 0, maximum: 60_000 })),
+		maxEvents: Type.Optional(Type.Number({ minimum: 1, maximum: 128 })),
+	}),
+	execute: executeReadUiEvents,
+});
+
+const unsubscribeUiTool = defineTool({
+	name: "unsubscribe_ui",
+	label: "Unsubscribe from UI",
+	description: "Close one actor-owned UI subscription and stop its event pump.",
+	parameters: Type.Object({ subscriptionId: Type.String({ maxLength: 128 }) }),
+	execute: executeUnsubscribeUi,
+});
+
 const launchBrowserTool = defineTool({
 	name: "launch_browser",
 	label: "Launch Browser Context",
@@ -193,7 +231,7 @@ function formatConfigStatus(): string {
 }
 
 export default function computerUseExtension(pi: ExtensionAPI): void {
-	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
+	for (const tool of [findTool, observeTool, searchUiTool, expandUiTool, inspectUiTool, actTool, readTextTool, waitForTool, subscribeUiTool, readUiEventsTool, unsubscribeUiTool, launchBrowserTool, navigateBrowserTool, evaluateBrowserTool]) pi.registerTool(tool);
 
 	pi.registerCommand("computer-use", {
 		description: "Show pi-computer-use configuration",

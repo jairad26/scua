@@ -57,7 +57,7 @@ export function scuaErrorEnvelope(error: unknown, cancelled = false): ScuaErrorE
 		return { code: error.code, message, actorId: error.actorId ?? currentActorId(), resourceKey: error.resourceKey, retryable: error.retryable, delivery: "definitely_not_delivered", recovery: error.recovery };
 	}
 	if (typeof enriched?.code === "string") {
-		const definitelyNotDelivered = new Set(["foreground_required", "stale_look", "stale_ref", "invalid_args", "coordinate_unavailable", "coordinate_unavailable_for_root", "occluded_target", "root_not_found", "element_ref_invalid"]);
+		const definitelyNotDelivered = new Set(["foreground_required", "stale_look", "stale_ref", "invalid_args", "coordinate_unavailable", "coordinate_unavailable_for_root", "occluded_target", "root_not_found", "element_ref_invalid", "subscription_unavailable", "subscription_owned", "cursor_invalid", "event_source_unavailable"]);
 		const unsupported = enriched.code === "foreground_required" || enriched.code === "coordinate_unavailable_for_root";
 		return {
 			code: enriched.code,

@@ -125,10 +125,30 @@ export interface ReadTextParams extends StateTargetParams {
 
 export interface WaitForParams extends StateTargetParams, UiCondition {}
 
+export interface SubscribeUiParams extends StateTargetParams, UiCondition {
+	/** Optional caller label used only for diagnostics. */
+	label?: string;
+}
+
+export interface ReadUiEventsParams {
+	subscriptionId: string;
+	/** Opaque durable cursor returned by subscribe_ui or a prior read_ui_events call. */
+	cursor: string;
+	timeoutMs?: number;
+	maxEvents?: number;
+}
+
+export interface UnsubscribeUiParams {
+	subscriptionId: string;
+}
+
 export const AGENT_TOOL_NAMES = new Set([
 	"find_roots",
 	"read_text",
 	"wait_for",
+	"subscribe_ui",
+	"read_ui_events",
+	"unsubscribe_ui",
 	"observe_ui",
 	"search_ui",
 	"expand_ui",

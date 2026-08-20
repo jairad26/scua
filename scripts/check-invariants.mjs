@@ -218,10 +218,19 @@ check("semantic observation continuations preserve eventual completeness", () =>
 check("INV-11 unified agent contract", () => {
 	const extension = fs.readFileSync(path.join(root, "extensions/computer-use.ts"), "utf8");
 	const tools = [...extension.matchAll(/\bname:\s*"([^"]+)"/g)].map((match) => match[1]);
-	const expected = ["find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "launch_browser", "navigate_browser", "evaluate_browser"];
+	const expected = ["find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "read_text", "wait_for", "subscribe_ui", "read_ui_events", "unsubscribe_ui", "launch_browser", "navigate_browser", "evaluate_browser"];
 	assert(JSON.stringify(tools) === JSON.stringify(expected), `unexpected public tool surface: ${tools.join(", ")}`);
 	assert(!extension.includes('executionMode: "sequential"'), "computer-use tools remain globally sequential");
 	assert(extension.includes("Required state id owning every @e ref"), "state-scoped ref contract is missing");
+});
+
+check("INV-11 durable UI subscriptions", () => {
+	const subscriptions = fs.readFileSync(path.join(root, "src/ui-subscriptions.ts"), "utf8");
+	assert(ts.includes("pumpNativeUiSubscription") && ts.includes("pumpBrowserUiSubscription"), "subscription sources do not cover native and browser roots");
+	assert(ts.includes("performObserve({ stateId: record.stateId, mode: \"semantic\" }"), "event delivery does not create an authoritative successor state");
+	assert(subscriptions.includes("droppedThroughSequence") && subscriptions.includes('type: "overflow"'), "bounded event overflow is not explicit");
+	assert(ts.includes("invalidateUiSubscriptionsForResource") && ts.includes("closeUiSubscriptionsForActor"), "handoff/actor-close subscription fencing is missing");
+	assert(swift.includes('case "axEventCursor"') && swift.includes('case "axReadEvents"'), "macOS helper does not expose AX event cursors");
 });
 
 check("INV-12 parallel native transports", () => {
@@ -520,7 +529,11 @@ async function liveChecks() {
 	try {
 		const socketPath = process.env.PI_CU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Caches/pi-computer-use/bridge.sock");
 		const diagnostics = await call(socketPath, { id: "inv-diagnostics", cmd: "diagnostics" });
-		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 14, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE diagnostics current protocol", () => assert(diagnostics.protocolVersion === 15, `protocolVersion=${diagnostics.protocolVersion}`));
+		check("LIVE UI event retention is bounded", () => {
+			assert(diagnostics.retention?.uiEvents?.observerLimit === 64, "native observer retention limit is missing");
+			assert(diagnostics.retention?.uiEvents?.eventLimitPerObserver === 4096, "native event retention limit is missing");
+		});
 		const broadDiscoveryStarted = Date.now();
 		const broadRoots = await call(socketPath, { id: "inv-broad-roots", cmd: "listRoots" }, 10000);
 		const broadDiscoveryMs = Date.now() - broadDiscoveryStarted;
@@ -528,13 +541,13 @@ async function liveChecks() {
 		check("LIVE broad root discovery is bounded and keeps helper alive", () => {
 			assert(Array.isArray(broadRoots?.roots), "broad listRoots did not return roots");
 			assert(broadDiscoveryMs < 10000, `broad listRoots took ${broadDiscoveryMs}ms`);
-			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 14, "helper did not survive broad listRoots");
+			assert(diagnosticsAfterBroadDiscovery.protocolVersion === 15, "helper did not survive broad listRoots");
 		});
 		const abandonedRequestId = `inv-abandoned-roots-${process.pid}-${Date.now()}`;
 		await abandon(socketPath, { id: abandonedRequestId, cmd: "listRoots" });
 		const diagnosticsAfterAbandon = await waitForCompletedRequest(socketPath, abandonedRequestId);
 		check("LIVE abandoned root discovery keeps helper alive", () => {
-			assert(diagnosticsAfterAbandon.protocolVersion === 14, "helper died after writing to an abandoned root-discovery socket");
+			assert(diagnosticsAfterAbandon.protocolVersion === 15, "helper died after writing to an abandoned root-discovery socket");
 		});
 		const explicitWindowId = process.env.PI_CU_LIVE_WINDOW_ID ? Number(process.env.PI_CU_LIVE_WINDOW_ID) : undefined;
 		let windows = [];

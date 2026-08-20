@@ -32,6 +32,15 @@ across windows in the same process. Handoff advances a fencing generation,
 revokes the prior owner, transfers browser-root discovery, and never transfers
 an old `stateId`.
 
+External orchestration can be event-driven without becoming application-
+specific. `subscribe_ui` binds an actor-owned resource and immutable baseline
+to a native AX or browser DOM notification cursor. `read_ui_events` is a
+cancelable long-read with an opaque resume cursor and bounded journal; every
+change is confirmed through a fresh semantic successor state before delivery.
+Overflow is explicit. Long-read cancellation, resource release, handoff, actor
+close, and source loss terminate the stream, so an old owner cannot continue
+observing through a stale lease.
+
 ## Generic tools, specialized backends
 
 SCUA does not add tools such as `notes.create_note` or

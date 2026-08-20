@@ -68,7 +68,7 @@ try {
 	send(2, "tools/list");
 	const listed = await receive(2);
 	const names = listed.result?.tools?.map((tool) => tool.name) ?? [];
-	const expected = ["actor_session", "claim_resource", "open_root", "find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "execute_plan", "read_text", "wait_for"];
+	const expected = ["actor_session", "claim_resource", "open_root", "find_roots", "observe_ui", "search_ui", "expand_ui", "inspect_ui", "act_ui", "execute_plan", "read_text", "wait_for", "subscribe_ui", "read_ui_events", "unsubscribe_ui"];
 	assert(JSON.stringify(names) === JSON.stringify(expected), `unexpected SCUA MCP tools: ${names.join(", ")}`);
 	assert(!names.some((name) => /notes|spotify|chrome/i.test(name)), "SCUA MCP surface contains an app-specific tool");
 

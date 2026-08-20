@@ -1,6 +1,6 @@
 {
 	"name": "@jairad26/scua",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "State-scoped semantic computer use with isolated roots, shared leases, and independent agent cursors.",
 	"type": "module",
 	"keywords": [
@@ -72,6 +72,8 @@
 		"test:runtime": "tsx scripts/check-runtime-concurrency.mjs",
 		"test:helper-transport": "tsx scripts/check-helper-transport.mjs",
 		"test:control-plane": "tsx scripts/check-control-plane.mjs",
+		"test:subscriptions": "tsx scripts/check-ui-subscriptions.mjs",
+		"test:subscriptions-live": "SCUA_SUBSCRIPTIONS_LIVE=1 node scripts/check-ui-subscriptions-live.mjs",
 		"soak:control-plane": "node scripts/soak-control-plane.mjs --duration-minutes 60",
 		"soak:orchestrator-live": "SCUA_ORCHESTRATOR_SOAK_LIVE=1 node scripts/soak-orchestrator-live.mjs --duration-minutes 60",
 		"test:action-plan": "tsx scripts/check-action-plan.mjs",
@@ -94,7 +96,7 @@
 		"test:macos-path": "node scripts/check-macos-helper-path.mjs",
 		"test:benchmark": "node scripts/check-benchmark-harness.mjs",
 		"benchmark:pilot": "node benchmarks/run-pilot.mjs",
-		"test": "npm run typecheck && npm run test:config && npm run test:schema && npm run test:mcp && npm run test:mcp-compact && npm run test:package-files && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:helper-transport && npm run test:control-plane && npm run test:action-plan && npm run test:user-activity && npm run test:cdp && npm run test:benchmark && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
+		"test": "npm run typecheck && npm run test:config && npm run test:schema && npm run test:mcp && npm run test:mcp-compact && npm run test:package-files && npm run test:output && npm run test:lifecycle && npm run test:runtime && npm run test:helper-transport && npm run test:control-plane && npm run test:subscriptions && npm run test:action-plan && npm run test:user-activity && npm run test:cdp && npm run test:benchmark && npm run test:invariants && npm run test:platform && npm run test:linux && npm run test:linux-scripts && npm run test:signing && npm run test:macos-path",
 		"test:mcp": "node scripts/check-mcp-server.mjs",
 		"test:mcp-compact": "node scripts/check-mcp-compact.mjs",
 		"test:package-files": "node scripts/check-package-files.mjs",

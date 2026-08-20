@@ -211,6 +211,16 @@ handoff. Actor action/time budgets, cancellation records, and a bounded event
 trace let an RLM, workflow engine, or ordinary program coordinate work without
 SCUA embedding its planning policy.
 
+Durable UI subscriptions sit beside operation leases rather than inside a
+model call. A subscription owns an actor, resource claim and generation,
+immutable baseline, platform-source cursor, bounded event journal, and opaque
+consumer cursor. macOS `AXObserver` and browser `MutationObserver` callbacks
+only wake the stream. Delivery performs a fresh semantic observation, evaluates
+any scoped condition against that successor, and returns its state ID. Buffer
+overflow is explicit and triggers the same authoritative refresh. MCP request
+cancellation, release, handoff, actor close, or source failure terminate the
+subscription, stop its pump, and fence the former owner.
+
 ## Native transports
 
 The macOS socket server and Windows line protocol accept multiple in-flight requests and correlate responses by request id. macOS protects shared AX ref/look stores and the root-event sequence; Windows uses a fixed worker pool and initializes UIA per worker thread. macOS keeps 512 immutable native look records; other backends retain bounded platform-specific stores. All serialize global physical input. Target focus, bounded occlusion preflight, and HID delivery share that same critical section; another worker cannot change the foreground between validation and delivery. UIA-only Windows batches do not acquire the global physical-input lock, while any batch that may fall back to pointer or keyboard delivery holds it for the complete transaction.

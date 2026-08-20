@@ -9,11 +9,17 @@ import {
 	executeReadText,
 	executeSearchUi,
 	executeWaitFor,
+	executeSubscribeUi,
+	executeReadUiEvents,
+	executeUnsubscribeUi,
 	executeLaunchBrowser,
 	executeNavigateBrowser,
 	handoffManagedRoot,
 	handoffSavedDesktopState,
 	releaseManagedRootsForActor,
+	closeUiSubscriptionsForActor,
+	invalidateUiSubscriptionsForResource,
+	uiSubscriptionDiagnostics,
 	shutdownComputerUseSession,
 } from "../src/bridge.ts";
 import { compactStructuredContent } from "./compact.ts";
@@ -24,7 +30,7 @@ import { executeAdaptiveActionPlan, type PlanErrorClassification } from "../src/
 import type { ActionPlanNode, ExecutePlanParams } from "../src/contract.ts";
 
 const serverName = "scua";
-const serverVersion = "0.2.0";
+const serverVersion = "0.6.0";
 const instructions = [
 	"SCUA is a generic, state-scoped computer-use engine.",
 	"Use find_roots, observe_ui, cached search/expand/inspect, then act_ui with refs from the same stateId.",
@@ -33,6 +39,7 @@ const instructions = [
 	"SCUA execution mode is configurable: background mode preserves attention when possible and safely escalates when required; foreground mode presents every action.",
 	"Independent physical resources may progress concurrently; stale writes are rejected by resource epoch.",
 	"External orchestrators can multiplex coordinator-issued logical actors through MCP request metadata scuaActorToken and use explicit resource acquire, renew, release, and atomic handoff.",
+	"Use subscribe_ui plus read_ui_events for durable change-driven orchestration; reuse opaque cursors exactly and consume the returned successor state after each change.",
 ].join(" ");
 
 type ToolExecutor = (
@@ -53,6 +60,9 @@ const executors: Record<string, ToolExecutor> = {
 	execute_plan: executePlanTool,
 	read_text: executeReadText as unknown as ToolExecutor,
 	wait_for: executeWaitFor as unknown as ToolExecutor,
+	subscribe_ui: executeSubscribeUi as unknown as ToolExecutor,
+	read_ui_events: executeReadUiEvents as unknown as ToolExecutor,
+	unsubscribe_ui: executeUnsubscribeUi as unknown as ToolExecutor,
 	open_root: (async (toolCallId, params, signal, onUpdate, ctx) => {
 		if (typeof params.stateId === "string" && params.stateId.trim()) {
 			return await (executeNavigateBrowser as unknown as ToolExecutor)(toolCallId, params, signal, onUpdate, ctx);
@@ -184,12 +194,14 @@ async function executeControlTool(name: string, args: Record<string, unknown>): 
 		}
 		if (action === "status") {
 			const status = scuaControlPlane.status(actor);
+			status.coordinator = { ...(status.coordinator as Record<string, unknown>), ...uiSubscriptionDiagnostics() };
 			return { content: [{ type: "text", text: `SCUA actor ${actor.actorId} status returned.` }], details: { tool: name, action, ...status } };
 		}
 		if (action === "close") {
+			const closedSubscriptionIds = closeUiSubscriptionsForActor(actor.actorId);
 			scuaControlPlane.closeActor(actor);
 			releaseManagedRootsForActor(actor.actorId);
-			return { content: [{ type: "text", text: `Closed SCUA actor ${actor.actorId} and released its claims.` }], details: { tool: name, action, actorId: actor.actorId, closed: true } };
+			return { content: [{ type: "text", text: `Closed SCUA actor ${actor.actorId} and released its claims.` }], details: { tool: name, action, actorId: actor.actorId, closed: true, closedSubscriptionIds } };
 		}
 		throw new Error("actor_session.action must be create, status, or close.");
 	}
@@ -200,12 +212,16 @@ async function executeControlTool(name: string, args: Record<string, unknown>): 
 	let claim: any;
 	if (action === "acquire") claim = scuaControlPlane.acquire(actor, resourceKey, ttlMs);
 	else if (action === "renew") claim = scuaControlPlane.renew(actor, resourceKey, leaseId, ttlMs);
-	else if (action === "release") scuaControlPlane.release(actor, resourceKey, leaseId);
+	else if (action === "release") {
+		scuaControlPlane.release(actor, resourceKey, leaseId);
+		claim = { released: true, invalidatedSubscriptionIds: invalidateUiSubscriptionsForResource(resourceKey, actor.actorId, "released") };
+	}
 	else if (action === "handoff") {
 		const fromActorId = actor.actorId;
 		claim = scuaControlPlane.handoff(actor, resourceKey, leaseId, typeof args.recipientActorId === "string" ? args.recipientActorId : "", ttlMs);
 		handoffManagedRoot(resourceKey, claim.actorId);
 		claim.stateId = handoffSavedDesktopState(resourceKey, fromActorId, claim.actorId);
+		claim.invalidatedSubscriptionIds = invalidateUiSubscriptionsForResource(resourceKey, fromActorId, "handed_off", { recipientActorId: claim.actorId, generation: claim.generation });
 	}
 	else throw new Error("claim_resource.action must be acquire, renew, release, or handoff.");
 	const details = { tool: name, action, actorId: actor.actorId, resourceKey, ...(claim ?? { released: true }) };

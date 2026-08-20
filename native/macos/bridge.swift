@@ -158,7 +158,6 @@ private struct RootAXEvent {
 	let sequence: UInt64
 	let timestamp: TimeInterval
 	let notification: String
-	let element: AXUIElement?
 }
 
 private final class RootAXObserverState {
@@ -539,7 +538,7 @@ final class InputSuppressionGuard {
 }
 
 final class Bridge {
-	private let protocolVersion = 14
+	private let protocolVersion = 15
 	private let refStore = AXRefStore()
 	private let inputSuppressionGuard = InputSuppressionGuard()
 	private let physicalUserActivity = PhysicalUserActivityMonitor()
@@ -559,7 +558,8 @@ final class Bridge {
 	private let lookRecordLock = NSLock()
 	private let rootObserverLock = NSLock()
 	private var rootObservers: [Int32: RootAXObserverState] = [:]
-	private let maxRootObservers = 4
+	private let maxRootObservers = 64
+	private let maxRootEvents = 4096
 	private let permissionCacheLock = NSLock()
 	private var grantedPermissionStatus: [String: Any]?
 	private let completedRequestLock = NSLock()
@@ -819,6 +819,10 @@ final class Bridge {
 			return try hitTest(request)
 		case "axWaitFor":
 			return try axWaitFor(request)
+		case "axEventCursor":
+			return try axEventCursor(request)
+		case "axReadEvents":
+			return try axReadEvents(request)
 		case "focusedElement":
 			return try focusedElement(request)
 		case "axReadText":
@@ -924,6 +928,14 @@ final class Bridge {
 		lookRecordLock.lock()
 		let lookRetention: [String: Int] = ["records": lookRecords.count, "limit": maxLookRecords]
 		lookRecordLock.unlock()
+		rootObserverLock.lock()
+		let observerRetention: [String: Int] = [
+			"observers": rootObservers.count,
+			"observerLimit": maxRootObservers,
+			"events": rootObservers.values.reduce(0) { $0 + $1.events.count },
+			"eventLimitPerObserver": maxRootEvents,
+		]
+		rootObserverLock.unlock()
 		var output: [String: Any] = [
 			"protocolVersion": protocolVersion,
 			"architectureVersion": 1,
@@ -936,7 +948,7 @@ final class Bridge {
 			"accessibility": permissions["accessibility"] ?? false,
 			"screenRecording": permissions["screenRecording"] ?? false,
 			"recentCompletedRequestIds": completedRequestIds(),
-			"retention": ["looks": lookRetention, "refs": refStore.retentionCounts()],
+			"retention": ["looks": lookRetention, "refs": refStore.retentionCounts(), "uiEvents": observerRetention],
 		]
 		if let parentPath {
 			output["parentPath"] = parentPath
@@ -2028,29 +2040,22 @@ final class Bridge {
 
 		let state = RootAXObserverState(pid: pid, observer: observer)
 		let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-		let notifications: [CFString] = [
-			"AXWindowCreated" as CFString,
-			"AXSheetCreated" as CFString,
-			"AXMenuOpened" as CFString,
-			"AXMenuClosed" as CFString,
-			"AXUIElementDestroyed" as CFString,
-			"AXFocusedWindowChanged" as CFString,
-			kAXValueChangedNotification as CFString,
-			kAXTitleChangedNotification as CFString,
-			kAXSelectedChildrenChangedNotification as CFString,
-			kAXLayoutChangedNotification as CFString,
-		]
+		let notifications = rootAXNotifications()
 		var registered = false
 		let observedElements = [appElement] + axElementArray(appElement, attribute: kAXWindowsAttribute as CFString)
 		for observed in observedElements {
-			for notification in notifications {
-				let status = AXObserverAddNotification(observer, observed, notification, context)
-				if status == .success || status == .notificationAlreadyRegistered { registered = true }
+			if registerRootAXNotifications(observer: observer, element: observed, context: context, notifications: notifications) {
+				registered = true
 			}
 		}
 		guard registered else { return false }
 
 		rootObserverLock.lock()
+		if let existing = rootObservers[pid] {
+			existing.lastUsed = Date().timeIntervalSince1970
+			rootObserverLock.unlock()
+			return true
+		}
 		if rootObservers.count >= maxRootObservers,
 			let evict = rootObservers.values.min(by: { $0.lastUsed < $1.lastUsed })?.pid
 		{
@@ -2069,16 +2074,44 @@ final class Bridge {
 		return true
 	}
 
+	private func rootAXNotifications() -> [CFString] {
+		[
+			"AXWindowCreated" as CFString,
+			"AXSheetCreated" as CFString,
+			"AXMenuOpened" as CFString,
+			"AXMenuClosed" as CFString,
+			"AXUIElementDestroyed" as CFString,
+			"AXFocusedWindowChanged" as CFString,
+			kAXValueChangedNotification as CFString,
+			kAXTitleChangedNotification as CFString,
+			kAXSelectedChildrenChangedNotification as CFString,
+			kAXLayoutChangedNotification as CFString,
+		]
+	}
+
+	private func registerRootAXNotifications(observer: AXObserver, element: AXUIElement, context: UnsafeMutableRawPointer, notifications: [CFString]? = nil) -> Bool {
+		var registered = false
+		for notification in notifications ?? rootAXNotifications() {
+			let status = AXObserverAddNotification(observer, element, notification, context)
+			if status == .success || status == .notificationAlreadyRegistered { registered = true }
+		}
+		return registered
+	}
+
 	private func recordRootAXEvent(observer: AXObserver, notification: String, element: AXUIElement) {
 		rootObserverLock.lock()
 		let state = rootObservers.values.first { CFEqual($0.observer, observer) }
 		if let state {
-			state.events.append(RootAXEvent(sequence: state.nextSequence, timestamp: Date().timeIntervalSince1970, notification: notification, element: element))
+			state.events.append(RootAXEvent(sequence: state.nextSequence, timestamp: Date().timeIntervalSince1970, notification: notification))
 			state.nextSequence += 1
-			if state.events.count > 64 { state.events.removeFirst(state.events.count - 64) }
+			if state.events.count > maxRootEvents { state.events.removeFirst(state.events.count - maxRootEvents) }
 		}
 		rootObserverLock.unlock()
 		if let state {
+			if notification == "AXWindowCreated" || notification == "AXSheetCreated" {
+				let context = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+				_ = registerRootAXNotifications(observer: state.observer, element: element, context: context)
+			}
 			state.change.lock()
 			state.changeGeneration += 1
 			state.change.broadcast()
@@ -2122,6 +2155,69 @@ final class Bridge {
 		defer { rootObserverLock.unlock() }
 		guard let events = rootObservers[pid]?.events else { return [] }
 		return events.filter { $0.sequence >= cursor }
+	}
+
+	private func rootEventBounds(pid: Int32) -> (earliest: UInt64, latest: UInt64, next: UInt64) {
+		rootObserverLock.lock()
+		defer { rootObserverLock.unlock() }
+		guard let state = rootObservers[pid] else { return (1, 0, 1) }
+		return (state.events.first?.sequence ?? state.nextSequence, state.events.last?.sequence ?? (state.nextSequence - 1), state.nextSequence)
+	}
+
+	private func waitForRootEvent(pid: Int32, since cursor: UInt64, until deadline: Date) {
+		rootObserverLock.lock()
+		let state = rootObservers[pid]
+		rootObserverLock.unlock()
+		guard let state else { return }
+		state.change.lock()
+		if state.nextSequence <= cursor {
+			_ = state.change.wait(until: deadline)
+		}
+		state.change.unlock()
+	}
+
+	private func axEventCursor(_ request: [String: Any]) throws -> [String: Any] {
+		let pid = Int32(try intArg(request, "pid"))
+		ensureEnhancedAccessibility(pid: pid)
+		guard ensureRootObserver(pid: pid) else {
+			throw BridgeFailure(message: "Accessibility change notifications are unavailable for pid \(pid)", code: "event_source_unavailable")
+		}
+		let bounds = rootEventBounds(pid: pid)
+		return ["cursor": bounds.next, "earliestCursor": bounds.earliest, "latestCursor": bounds.latest]
+	}
+
+	private func axReadEvents(_ request: [String: Any]) throws -> [String: Any] {
+		let pid = Int32(try intArg(request, "pid"))
+		let requestedCursor = UInt64(max(1, try intArg(request, "cursor")))
+		let timeoutMs = max(0, min(10_000, optionalIntArg(request, "timeoutMs") ?? 4_000))
+		let maxEvents = max(1, min(256, optionalIntArg(request, "maxEvents") ?? 64))
+		ensureEnhancedAccessibility(pid: pid)
+		guard ensureRootObserver(pid: pid) else {
+			throw BridgeFailure(message: "Accessibility change notifications are unavailable for pid \(pid)", code: "event_source_unavailable")
+		}
+		let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+		var bounds = rootEventBounds(pid: pid)
+		if bounds.next <= requestedCursor && timeoutMs > 0 {
+			waitForRootEvent(pid: pid, since: requestedCursor, until: deadline)
+			bounds = rootEventBounds(pid: pid)
+		}
+		let effectiveCursor = max(requestedCursor, bounds.earliest)
+		let available = Array(rootEvents(pid: pid, since: effectiveCursor).prefix(maxEvents))
+		let nextCursor = available.last.map { $0.sequence + 1 } ?? effectiveCursor
+		let events = available.map { event in
+			[
+				"sequence": event.sequence,
+				"timestamp": event.timestamp * 1000.0,
+				"notification": event.notification,
+			] as [String: Any]
+		}
+		return [
+			"events": events,
+			"cursor": nextCursor,
+			"earliestCursor": bounds.earliest,
+			"latestCursor": bounds.latest,
+			"overflow": requestedCursor < bounds.earliest,
+		]
 	}
 
 	// Onscreen CGWindowList id set for one pid: ~1-2ms per call, so it can be

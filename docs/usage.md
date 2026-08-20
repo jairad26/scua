@@ -20,6 +20,9 @@ The normal loop is:
 | `execute_plan` | MCP-only: execute a guarded dependency DAG of ordinary `act_ui` transactions with bounded parallelism and localized recovery. |
 | `read_text` | Read fixed pages from state-owned `@e` text or immutable `@o` output. |
 | `wait_for` | Wait for a precise, optionally scoped condition. |
+| `subscribe_ui` | Create an actor-owned native/browser change stream from an immutable state. |
+| `read_ui_events` | Long-read bounded events from an opaque cursor and return an authoritative successor state. |
+| `unsubscribe_ui` | Close a subscription and stop its event pump. |
 | `launch_browser` | Start a managed CDP browser and return its observed page state. |
 | `navigate_browser` | Navigate the browser page owned by a state. |
 | `evaluate_browser` | Evaluate JavaScript in the browser page owned by a state. |
@@ -54,6 +57,45 @@ to the configured latency window for matching nodes and returns
 newer index revision, its returned `stateId` is the one to use for later
 inspection or action. There is no total semantic node cap; the native per-slice
 budget only prevents one traversal from monopolizing the helper.
+
+## Durable change subscriptions
+
+Use subscriptions when an external orchestrator needs to react to future UI
+changes without repeatedly calling `observe_ui`:
+
+```ts
+const subscription = subscribe_ui({
+  stateId,
+  scopeRef: "@e12",
+  text: "Complete",
+  until: "present"
+})
+
+const next = read_ui_events({
+  subscriptionId: subscription.subscriptionId,
+  cursor: subscription.cursor,
+  timeoutMs: 60_000
+})
+```
+
+`subscribe_ui` acquires or renews the actor's resource claim. Native macOS
+subscriptions are woken by `AXObserver`; managed browser subscriptions are
+woken by a page-local `MutationObserver`. These notifications are hints, not
+state: `read_ui_events` performs an authoritative semantic observation before
+returning a changed `stateId`. A conditioned read continues through unrelated
+notifications until its condition is established, the stream terminates, or
+the deadline expires.
+
+Always pass `nextCursor` to the next read. Cursors are opaque, actor-scoped,
+and safe to resume across individual MCP calls or transport reconnects while
+the coordinator process and actor session remain alive. Every retained event
+includes `subscriptionId`, `actorId`, `resourceKey`, `resourceEpoch`, and a
+stable `traceId` for delivery-safe deduplication. The stream retains at most
+256 events and terminal records expire after five inactive minutes; a lagging
+cursor receives an explicit `overflow` event and authoritative refresh.
+Cancellation, release, handoff, actor close, and source failure stop the pump;
+old ownership is never silently transferred. Use `unsubscribe_ui` when the
+stream is no longer needed.
 
 ## Acting and batching
 

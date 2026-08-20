@@ -1,7 +1,7 @@
 import { getComputerUseConfig } from "../../config.ts";
 import { parseLookResponse, type LookResponse } from "../../outline.ts";
 import { toBoolean, toFiniteNumber, toOptionalString } from "../coerce.ts";
-import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformUserActivitySnapshot, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
+import type { ComputerUsePlatformBackend, FramePoints, HelperActResult, PlatformActRequest, PlatformApp, PlatformFocusWindowResult, PlatformFrontmostResult, PlatformObserveRequest, PlatformReadTextRequest, PlatformReadTextResponse, PlatformReadUiEventsRequest, PlatformReadUiEventsResponse, PlatformRoot, PlatformRootKind, PlatformRootQuery, PlatformTarget, PlatformUiEventCursorRequest, PlatformUiEventCursorResponse, PlatformUserActivitySnapshot, PlatformWaitForRequest, PlatformWaitForResponse } from "../types.ts";
 import { macosHelper } from "./helper.ts";
 
 function parseApps(result: unknown): PlatformApp[] {
@@ -69,7 +69,7 @@ function helperAction(request: PlatformActRequest): Record<string, unknown> {
 	return { ...request, target: request.target.focus, params: { ...request.params, preserveFocus: true } };
 }
 
-export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "getUserActivity" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor"> = {
+export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRoots" | "getFrontmost" | "getUserActivity" | "focusWindow" | "observe" | "act" | "actBatch" | "readText" | "waitFor" | "uiEventCursor" | "readUiEvents"> = {
 	async listApps(signal?: AbortSignal): Promise<PlatformApp[]> {
 		return parseApps(await macosHelper.command<unknown>("listApps", {}, { signal }));
 	},
@@ -140,5 +140,14 @@ export const macosBackend: Pick<ComputerUsePlatformBackend, "listApps" | "listRo
 		// deadline, so the transport must not race the operation it is carrying.
 		const transportTimeoutMs = Math.max(options?.timeoutMs ?? 0, args.timeoutMs + 3_000);
 		return await macosHelper.command("axWaitFor", { ...args }, { ...options, timeoutMs: transportTimeoutMs });
+	},
+
+	async uiEventCursor(args: PlatformUiEventCursorRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformUiEventCursorResponse> {
+		return await macosHelper.command("axEventCursor", { ...args }, options);
+	},
+
+	async readUiEvents(args: PlatformReadUiEventsRequest, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<PlatformReadUiEventsResponse> {
+		const transportTimeoutMs = Math.max(options?.timeoutMs ?? 0, args.timeoutMs + 2_000);
+		return await macosHelper.command("axReadEvents", { ...args }, { ...options, timeoutMs: transportTimeoutMs });
 	},
 };

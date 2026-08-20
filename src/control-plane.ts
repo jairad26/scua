@@ -127,6 +127,13 @@ class ControlPlane {
 		return { ...claim };
 	}
 
+	/** Internal keepalive for a previously authenticated actor-owned stream. */
+	renewOwnedResource(actorId: string, resourceKey: string, leaseId: string, ttlMs = DEFAULT_TTL_MS): ResourceClaim {
+		const actor = this.actorsById.get(actorId);
+		if (!actor || actor.closedAt) throw new OwnershipError("actor_invalid", `Actor '${actorId}' is invalid or closed.`, { actorId, recovery: "abort" });
+		return this.renew(actor, resourceKey, leaseId, ttlMs);
+	}
+
 	release(actor: ActorSession, resourceKey: string, leaseId: string): void {
 		this.requireClaim(actor, resourceKey, leaseId);
 		this.assertNotInFlight(resourceKey, actor.actorId);
