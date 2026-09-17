@@ -284,6 +284,7 @@ class ControlPlane {
 
 export const scuaControlPlane = new ControlPlane();
 const actorContext = new AsyncLocalStorage<ActorSession>();
+const visualAgentContext = new AsyncLocalStorage<string>();
 
 export function currentActor(): ActorSession {
 	return actorContext.getStore() ?? scuaControlPlane.defaultActor;
@@ -293,9 +294,22 @@ export function currentActorId(): string {
 	return currentActor().actorId;
 }
 
+/** A worker-scoped visual identity. Several autonomous workers may share one
+ * logical actor (and therefore one ownership/security boundary) while retaining
+ * independent on-screen cursors. */
+export function currentVisualAgentId(): string | undefined {
+	return visualAgentContext.getStore();
+}
+
 export async function runAsActor<T>(token: string | undefined, work: () => Promise<T>): Promise<T> {
 	const actor = scuaControlPlane.actor(token);
 	return await actorContext.run(actor, work);
+}
+
+export async function runAsVisualAgent<T>(visualAgentId: string, work: () => Promise<T>): Promise<T> {
+	const normalized = visualAgentId.trim();
+	if (!normalized) throw new Error("visualAgentId must be non-empty.");
+	return await visualAgentContext.run(normalized, work);
 }
 
 export function assertCurrentActorMutation(resourceKey: string): void {

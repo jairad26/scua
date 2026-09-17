@@ -41,6 +41,21 @@ Overflow is explicit. Long-read cancellation, resource release, handoff, actor
 close, and source loss terminate the stream, so an old owner cannot continue
 observing through a stale lease.
 
+## Jev policy layer
+
+`execute_goal` places a TypeSafe Jev policy above this control path. Each ready
+task runs an independent observe → choose → act → successor loop with its own
+visual cursor. Jev receives structured task and UI state plus complete
+action-target alternatives; it never receives a generic tool socket and never
+executes a side effect. SCUA admits the selected action only after confidence
+and margin checks, then applies the same ownership, epoch, user-activity,
+delivery, and verification rules as a direct `act_ui` call.
+
+This is intentionally asymmetric: Jev is the default autonomous decision
+engine, while SCUA remains the authority. Deterministic callers may bypass
+policy with `act_ui` or `execute_plan`, and an unavailable or uncertain Jev
+call produces an escalation rather than unsafe fallback behavior.
+
 ## Generic tools, specialized backends
 
 SCUA does not add tools such as `notes.create_note` or
@@ -148,7 +163,7 @@ reconstruction.
 
 ## Roadmap
 
-SCUA is intended to remain model- and orchestrator-agnostic while becoming safe
-to drive from a dynamic multi-actor control plane. Confirmed gaps, prioritized
-fixes, and the fifty-actor acceptance gate are maintained in the
+SCUA keeps its execution contract model-agnostic even though its default
+autonomous policy is Jev. Confirmed gaps, prioritized fixes, and the
+fifty-actor acceptance gate are maintained in the
 [SCUA roadmap](roadmap.md).

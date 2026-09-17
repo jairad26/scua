@@ -120,6 +120,19 @@ const planNode: JsonSchema = {
 	],
 };
 
+const goalTask = object({
+	id: string("Stable task ID within this goal run."),
+	objective: string("Task-specific objective; defaults to the overall goal."),
+	dependsOn: { type: "array", items: string("Predecessor task ID."), uniqueItems: true },
+	root: string("Exact @r root reference. Omit root/stateId/stateFrom only for a single frontmost-root task."),
+	stateId,
+	stateFrom: string("Successful predecessor task whose final immutable state becomes this task's input."),
+	maxSteps: number("Maximum Jev decisions and actions for this worker.", { minimum: 1, maximum: 30, default: 12 }),
+	completion: condition,
+	textValues: { type: "object", description: "Named text payloads the policy may select for editable fields.", additionalProperties: { type: "string" } },
+	context: { type: "object", description: "Small JSON context supplied to this task's policy decisions.", additionalProperties: true },
+}, ["id"]);
+
 export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"actor_session",
@@ -157,6 +170,19 @@ export const mcpTools: McpToolDefinition[] = [
 			url: string("Absolute HTTP(S) URL."),
 			stateId: string("Existing browser-page state to navigate; omit to create a new isolated root."),
 		}, ["url"]),
+		false,
+	),
+	tool(
+		"execute_goal",
+		"Execute autonomous goal",
+		"Run a Jev-first autonomous goal over one or more independently scheduled cursor workers. Each Jev call selects one complete action-target pair from the full immutable SCUA state; deterministic leases, state epochs, actions, verification, dependencies, and handoffs remain enforced by SCUA. Low-confidence or unsupported decisions fail closed as escalations.",
+		object({
+			goal: string("Overall goal shared by all workers."),
+			tasks: { type: "array", items: goalTask, minItems: 1, maxItems: 32 },
+			maxConcurrency: number("Maximum independently progressing cursor workers.", { minimum: 1, maximum: 16, default: 8 }),
+			minConfidence: number("Minimum Jev confidence required before side effects.", { minimum: 0, maximum: 1, default: 0.6 }),
+			minMargin: number("Minimum top-choice probability margin required before side effects.", { minimum: 0, maximum: 1, default: 0.12 }),
+		}, ["goal"]),
 		false,
 	),
 	tool(

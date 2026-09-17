@@ -27,12 +27,14 @@ import { mcpTools } from "./tool-catalog.ts";
 import { currentActor, runAsActor, scuaControlPlane } from "../src/control-plane.ts";
 import { scuaErrorEnvelope } from "./errors.ts";
 import { executeAdaptiveActionPlan, type PlanErrorClassification } from "../src/action-plan.ts";
-import type { ActionPlanNode, ExecutePlanParams } from "../src/contract.ts";
+import { createGoalExecutor } from "../src/goal-executor.ts";
+import type { ActionPlanNode, ExecuteGoalParams, ExecutePlanParams } from "../src/contract.ts";
 
 const serverName = "scua";
 const serverVersion = "0.6.0";
 const instructions = [
 	"SCUA is a generic, state-scoped computer-use engine.",
+	"Prefer execute_goal for autonomous work: Jev independently selects bounded action-target pairs while SCUA retains deterministic authority over side effects, verification, ownership, and state.",
 	"Use find_roots, observe_ui, cached search/expand/inspect, then act_ui with refs from the same stateId.",
 	"The same tool contract applies to every desktop window and browser-page root; never invent or request app-specific SCUA tools.",
 	"Never silently substitute a different application or web version when the selected root cannot satisfy an action.",
@@ -50,6 +52,21 @@ type ToolExecutor = (
 	ctx: ExtensionContext,
 ) => Promise<{ content: Array<{ type: string; [key: string]: unknown }>; details?: unknown }>;
 
+const runAutonomousGoal = createGoalExecutor({
+	observe: async (toolCallId, params, signal, ctx) => await (executeObserve as unknown as ToolExecutor)(toolCallId, params, signal, undefined, ctx) as any,
+	act: async (toolCallId, params, signal, ctx) => await (executeAct as unknown as ToolExecutor)(toolCallId, params, signal, undefined, ctx) as any,
+});
+
+async function executeGoalTool(
+	toolCallId: string,
+	params: ExecuteGoalParams,
+	signal: AbortSignal | undefined,
+	_onUpdate: undefined,
+	ctx: ExtensionContext,
+) {
+	return await runAutonomousGoal(toolCallId, params, signal, ctx);
+}
+
 const executors: Record<string, ToolExecutor> = {
 	find_roots: executeFind as unknown as ToolExecutor,
 	observe_ui: executeObserve as unknown as ToolExecutor,
@@ -57,6 +74,7 @@ const executors: Record<string, ToolExecutor> = {
 	expand_ui: executeExpandUi as unknown as ToolExecutor,
 	inspect_ui: executeInspectUi as unknown as ToolExecutor,
 	act_ui: executeAct as unknown as ToolExecutor,
+	execute_goal: executeGoalTool as ToolExecutor,
 	execute_plan: executePlanTool,
 	read_text: executeReadText as unknown as ToolExecutor,
 	wait_for: executeWaitFor as unknown as ToolExecutor,

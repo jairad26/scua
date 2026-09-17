@@ -4,6 +4,8 @@ SCUA is a state-scoped semantic computer runtime for macOS. An orchestrator—
 Codex, an RLM, a workflow engine, or ordinary code—owns decomposition and
 reasoning. SCUA owns immutable UI state, generic actions, actor identity,
 resource isolation, checked mutation, cancellation, handoff, and evidence.
+Its default autonomous execution path uses TypeSafe Jev for fast bounded
+action-target judgments while keeping all side effects inside that runtime.
 
 ## Shipped foundation
 
@@ -36,6 +38,10 @@ resource isolation, checked mutation, cancellation, handoff, and evidence.
 - The Chrome companion reuses the existing focused window, creates inactive
   tabs in one session workspace group, fences debugger commands to owned tabs,
   supports concurrent actor tabs, and cleans up only its own tabs at shutdown.
+- `execute_goal` runs independently progressing Jev cursor workers, preserves
+  terminal choices across uncapped hierarchical UI selection, hands exact
+  successor states through typed dependencies, and fails closed below explicit
+  confidence and probability-margin gates.
 
 ## Release gates
 
@@ -83,7 +89,8 @@ cursor is not by itself proof that the requested outcome occurred.
 
 ## Non-goals
 
-- Embedding a planner, RLM, or task-decomposition policy inside SCUA.
+- Making Jev responsible for leases, state identity, side effects, outcome
+  verification, or unconstrained task decomposition.
 - Adding one public tool per application or workflow.
 - Claiming universal background control where the OS or application exposes no
   reliable path.

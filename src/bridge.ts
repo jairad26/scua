@@ -23,7 +23,7 @@ import { rebindActParams } from "./rebind.ts";
 import { scoreWindow, shouldPreferForegroundModalWindow } from "./root-selection.ts";
 import { SavedStates, type CurrentCapture, type CurrentTarget, type OperationState, type UiObservation } from "./state.ts";
 import type { StoredState } from "./runtime.ts";
-import { claimCurrentActorResource, currentActor, currentActorId, scuaControlPlane, withCurrentActorMutation } from "./control-plane.ts";
+import { claimCurrentActorResource, currentActor, currentActorId, currentVisualAgentId, scuaControlPlane, withCurrentActorMutation } from "./control-plane.ts";
 import { assertUserQuietPeriod, UserActiveError, waitForUserQuietPeriod, type UserActivitySnapshot } from "./user-activity.ts";
 import { changesBetween, renderChanges, stabilizeRefs } from "./view.ts";
 import {
@@ -396,6 +396,8 @@ const SCUA_AGENT_ID = process.env.SCUA_AGENT_ID?.trim() || randomUUID();
 const SEMANTIC_SEARCH_WAIT_MS = Math.max(100, Math.min(10_000, Number(process.env.SCUA_SEMANTIC_SEARCH_WAIT_MS ?? 2_000)));
 
 function visualAgentId(): string {
+	const workerId = currentVisualAgentId();
+	if (workerId) return workerId;
 	const actorId = currentActorId();
 	return actorId === "default" ? SCUA_AGENT_ID : actorId;
 }

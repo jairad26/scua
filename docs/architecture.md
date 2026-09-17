@@ -24,6 +24,8 @@ The implementation keeps that ownership explicit:
 | `actions.ts` | Validation, normalization, target resolution, dependent focus, and safe retry eligibility |
 | `bridge.ts` | Tool coordination and resource scheduling |
 | `control-plane.ts` | Logical actors, budgets, durable ownership, handoff fencing, and lifecycle traces |
+| `jev-policy.ts` | Typed action-target judgment, confidence evidence, and uncapped hierarchical candidate reduction |
+| `goal-executor.ts` | Independent autonomous worker loops, dependencies, state handoffs, and escalation boundaries |
 | `view.ts` | Stable public refs and full-versus-changes rendering |
 | `outline.ts` | Parsing and querying complete UI trees |
 | `platform/*` | OS observation, input mechanics, and native protocol translation |
@@ -52,6 +54,39 @@ flowchart TB
 There is no session-wide current UI. Every call hydrates request-local state from `stateId`; unrelated calls cannot overwrite one another. Stored observations are immutable and bounded, so old refs either resolve to their exact observation or fail clearly after eviction.
 
 The scheduler serializes live operations only when they address the same physical resource. Different desktop processes and different CDP targets can run concurrently. Cached outline queries bypass it entirely. Every resource has a monotonically increasing epoch. A mutating call must present the epoch captured by its state; if another write won the race, the stale call is rejected before dispatch.
+
+## Jev-first autonomous execution
+
+`execute_goal` is SCUA's default autonomous control path. It does not replace
+the state engine with a model. It composes a small deterministic loop:
+
+```text
+observe immutable state
+  -> enumerate complete action-target pairs
+  -> Jev chooses one pair with probabilities
+  -> confidence and margin gate
+  -> SCUA lease + epoch + delivery + verification
+  -> independently continue from the successor state
+```
+
+Every ready task owns a worker-scoped visual cursor and advances on its own
+completion schedule. There is no global observe/decide/act barrier, so a slow
+application does not make unrelated cursors freeze. Dependencies carry typed
+status and the exact successful successor `stateId`; `stateFrom` starts a
+dependent worker from that immutable state. They do not exchange free-form
+agent chat.
+
+Jev chooses one complete pair—such as `press @e12` or `set payload title on
+@e7`—rather than independently predicting an action and a target. Large trees
+are not truncated to fit one Choice question: candidates are reduced through
+batched hierarchical questions, with `done`, `wait`, and `escalate` retained
+at every level. Model confidence is evidence about concentration, not proof of
+correctness, so both confidence and top-two probability margin must clear the
+configured gates before a side effect.
+
+Known actions and precompiled DAGs still use `act_ui` and `execute_plan`
+directly. Those are the deterministic substrate, the debugging interface, and
+the outage path when TypeSafe is unavailable—not a competing autonomous mode.
 
 Desktop scheduling is conservatively keyed by process rather than window because accessibility focus, menus, and physical input can cross window boundaries inside an app. CDP scheduling is keyed by page target. Global physical input remains mutex-protected in the native helper; semantic AX/UIA work can overlap where the platform permits it.
 

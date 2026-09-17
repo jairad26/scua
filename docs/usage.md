@@ -11,6 +11,7 @@ The normal loop is:
 
 | Tool | Purpose |
 | --- | --- |
+| `execute_goal` | Run one or more Jev-first autonomous cursor workers with typed dependencies, successor-state handoffs, bounded concurrency, and fail-closed confidence gates. |
 | `find_roots` | Return a bounded, ranked set of desktop and CDP browser-page roots. |
 | `observe_ui` | Capture the current/frontmost root or one exact `@r` root and return a folded outline plus `stateId`. |
 | `search_ui` | Run a bounded, ranked query over the full cached outline. |
@@ -104,6 +105,56 @@ old ownership is never silently transferred. Use `unsubscribe_ui` when the
 stream is no longer needed.
 
 ## Acting and batching
+
+### Autonomous goals
+
+Use `execute_goal` when the steps depend on what each application reveals at
+runtime. Independent tasks progress concurrently; dependent tasks begin only
+after their predecessors succeed:
+
+```ts
+execute_goal({
+  goal: "Prepare a launch brief and send the final status",
+  maxConcurrency: 3,
+  tasks: [
+    {
+      id: "research",
+      root: browserRoot,
+      objective: "Find the launch facts",
+      completion: { text: "Launch date" }
+    },
+    {
+      id: "draft",
+      root: notesRoot,
+      dependsOn: ["research"],
+      objective: "Write the brief",
+      textValues: { title: "Launch brief", body: "..." }
+    },
+    {
+      id: "send",
+      stateFrom: "draft",
+      dependsOn: ["draft"],
+      objective: "Send the completed status"
+    }
+  ]
+})
+```
+
+`root` starts from an exact discovered root, `stateId` starts from an existing
+observation, and `stateFrom` hands a predecessor's exact final state to the
+dependent. Named `textValues` are available as complete set-text candidates;
+their content is never copied into the candidate description. A deterministic
+`completion` condition is checked before every model call.
+
+Defaults require Jev confidence of 0.60 and a top-choice margin of 0.12. A
+branch below either threshold performs no action and returns `escalated` with
+the decision evidence. `done` and `escalate` are explicit policy choices;
+reaching the per-task step budget also escalates. SCUA does not silently invoke
+a larger model or ask another worker to improvise.
+
+On macOS, credentials resolve from the `TYPESAFE_API_KEY` environment variable,
+the `ai.typesafe.scua` Keychain service, or AWS Secrets Manager. The AWS secret
+defaults to ID `TYPESAFE_API_KEY` and JSON key `TYPESAFE_API_KEY`.
 
 The public action shape is always transactional:
 

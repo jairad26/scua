@@ -129,6 +129,31 @@ export interface ExecutePlanParams {
 	maxConcurrency?: number;
 }
 
+export interface GoalTask {
+	id: string;
+	objective?: string;
+	dependsOn?: string[];
+	root?: RootSelector;
+	stateId?: string;
+	/** Start from the successful final state of this dependency. */
+	stateFrom?: string;
+	maxSteps?: number;
+	/** Deterministic success condition checked before every Jev decision. */
+	completion?: UiCondition;
+	/** Named text payloads Jev may select without receiving the secret/content
+	 * itself in candidate descriptions. */
+	textValues?: Record<string, string>;
+	context?: Record<string, unknown>;
+}
+
+export interface ExecuteGoalParams {
+	goal: string;
+	tasks?: GoalTask[];
+	maxConcurrency?: number;
+	minConfidence?: number;
+	minMargin?: number;
+}
+
 export interface ReadTextParams extends StateTargetParams {
 	ref: string;
 	offset?: number;

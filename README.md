@@ -21,6 +21,7 @@ element, and action model.
 - `actor_session`
 - `claim_resource`
 - `open_root`
+- `execute_goal` (Jev-first autonomous workers)
 - `find_roots`
 - `observe_ui`
 - `search_ui`
@@ -78,6 +79,16 @@ conflicting branch within a strict retry budget. It never retries an action
 whose delivery may already have occurred. This remains a lowest-common-
 denominator UI primitive rather than one tool per application.
 
+For autonomous work, `execute_goal` is the default high-level path. It starts
+independent cursor workers for ready tasks and gives each worker the complete
+immutable UI state as a bounded set of action-target pairs. TypeSafe Jev makes
+the fast local judgment about which pair best advances the task; SCUA—not
+Jev—retains authority over ownership, state epochs, delivery, verification,
+dependencies, cancellation, and successor-state handoff. Workers progress as
+soon as their own observation or action completes rather than freezing at
+global step barriers. Low-confidence, low-margin, unsupported, and exhausted
+branches stop as typed escalations before another side effect.
+
 Plan actions may use semantic `selector` targets instead of future `@e` refs.
 Each selector is resolved against that node's exact predecessor state, so a
 single plan can open a menu, target the menu item that appears, and then edit
@@ -106,6 +117,12 @@ npm install
 npm test
 ./scripts/run-mcp.sh
 ```
+
+`execute_goal` resolves TypeSafe credentials from `TYPESAFE_API_KEY`, then the
+macOS Keychain service `ai.typesafe.scua`, then AWS Secrets Manager secret
+`TYPESAFE_API_KEY` (override with `SCUA_TYPESAFE_SECRET_ID`). Low-level tools
+remain usable without TypeSafe for deterministic plans, debugging, and outage
+recovery.
 
 For existing-window Chrome isolation, install the local companion once:
 
@@ -191,6 +208,7 @@ Use `/computer-use` inside Pi to show the active configuration and where it came
 - `actor_session`
 - `claim_resource`
 - `open_root`
+- `execute_goal` (Jev-first autonomous workers)
 - `find_roots`
 - `observe_ui`
 - `search_ui`
