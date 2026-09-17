@@ -49,7 +49,10 @@ class FakeWebSocket {
 		} else if (message.method === "DOM.resolveNode") {
 			result = { object: { objectId: "object-1" } };
 		} else if (message.method === "Runtime.callFunctionOn") {
-			result = callFunctionThrows ? { exceptionDetails: { text: "fixture exception" } } : { result: { value: true } };
+			const functionDeclaration = String(message.params?.functionDeclaration ?? "");
+			result = callFunctionThrows
+				? { exceptionDetails: { text: "fixture exception" } }
+				: { result: { value: functionDeclaration.includes("return String(this.value") ? "Fixture value" : true } };
 		}
 		queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) }));
 	}
@@ -68,7 +71,7 @@ globalThis.fetch = async () => ({
 process.env.PI_COMPUTER_USE_CDP_PORT = "9222";
 
 try {
-	const { CdpTab, cdpMutationGenerationForContext, cdpPerformActionDetailedForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
+	const { CdpTab, cdpBackendNodeValueForContext, cdpMutationGenerationForContext, cdpPerformActionDetailedForContext, cdpPerformActionForContext, cdpSnapshotForContext, cdpWaitForMutationForContext, disconnectCdp } = await import("../src/cdp.ts");
 	const contextId = "browser:target-1";
 	const first = await cdpSnapshotForContext(contextId);
 	const second = await cdpSnapshotForContext(contextId);
@@ -82,6 +85,7 @@ try {
 
 	const delivered = await cdpPerformActionForContext(contextId, "fixture-agent", { action: "click", x: 9_999, y: 9_999 }, undefined);
 	assert.equal(delivered, false, "coordinate click with no element incorrectly reported delivery");
+	assert.equal(await cdpBackendNodeValueForContext(contextId, 42), "Fixture value", "exact DOM-backed value verification failed");
 
 	cursorEvaluateThrows = true;
 	const cursorFailure = await cdpPerformActionDetailedForContext(contextId, "fixture-agent", { action: "moveMouse", x: 20, y: 20 }, undefined);

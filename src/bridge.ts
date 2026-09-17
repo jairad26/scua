@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { canRetryInForeground, outcomeAfterCheck, outcomeAfterObservedTransition, outcomeAfterObservedValues, prepareAction, type ActionState, type PreparedAction } from "./actions.ts";
-import { cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionDetailedForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, createManagedCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpCursorEvidence, type CdpPageContext, type CdpPageSnapshot } from "./cdp.ts";
+import { cdpBackendNodeValueForContext, cdpBringToFrontForContext, cdpEvaluateForContext, cdpMutationGenerationForContext, cdpNavigateContext, cdpPerformActionDetailedForContext, cdpSnapshotForContext, cdpTabForWindow, cdpWaitForMutationForContext, closeCdpBrowser, createCdpPageContext, createManagedCdpPageContext, disconnectCdp, listCdpPageContexts, type CdpConsoleEntry, type CdpCursorEvidence, type CdpPageContext, type CdpPageSnapshot } from "./cdp.ts";
 import { chromeExtensionAvailable, chromeExtensionCloseWorkspace } from "./chrome-extension-bridge.ts";
 import { getComputerUseConfig, isBrowserUseEnabled, isHeadlessMode, loadComputerUseConfig } from "./config.ts";
 import { noteAfterAct, noteFromLook, noteRegionKeyForRef, renderNote, type WindowNote } from "./note.ts";
@@ -3418,8 +3418,24 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 		let finalSnapshot: CdpPageSnapshot | undefined;
 		if (condition) {
 			const verificationStartedAt = Date.now();
+			const exactSetText = prepared.length === 1
+				&& prepared[0].action.action === "setText"
+				&& condition.scopeExact
+				&& condition.value !== undefined
+				&& condition.scopeRef === prepared[0].action.ref
+				&& Number.isFinite(prepared[0].target?.backendNodeId)
+				? prepared[0] : undefined;
+			if (exactSetText) {
+				try {
+					const liveValue = await cdpBackendNodeValueForContext(contextId, exactSetText.target!.backendNodeId!);
+					(execution.evidence as Record<string, unknown>).directValueVerification = { expected: condition.value, observed: liveValue };
+					satisfied = liveValue !== undefined && normalizeText(liveValue) === normalizeText(condition.value);
+				} catch (error) {
+					(execution.evidence as Record<string, unknown>).directValueVerification = { expected: condition.value, error: error instanceof Error ? error.message : String(error) };
+				}
+			}
 			const deadline = Date.now() + condition.timeoutMs;
-			do {
+			while (!satisfied && Date.now() < deadline) {
 				finalSnapshot = await cdpSnapshotForContext(contextId);
 				if (!finalSnapshot) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
 				const present = outlineConditionPresent(restoreOutline(finalSnapshot.outline), condition);
@@ -3431,7 +3447,7 @@ async function performBrowserTransaction(params: ActParams, actions: UiAction[],
 					if (nextGeneration === undefined) throw new Error(`Browser root '${contextId}' is no longer available. Observe it again.`);
 					mutationGeneration = nextGeneration;
 				}
-			} while (!satisfied && Date.now() < deadline);
+			}
 			execution.verification = {
 				status: satisfied ? (desiredWasPreexisting ? "preexisting" : "verified") : "failed",
 				text: condition.text,

@@ -356,6 +356,11 @@ export class CdpTab {
 		return (await this.withBackendNode(backendNodeId, "function(text, replace){ if (!this.isConnected) return false; this.scrollIntoView({block:'center', inline:'center'}); this.focus(); if (replace) { if ('value' in this) this.value = ''; else this.textContent = ''; } if ('value' in this) this.value += text; else this.textContent = (this.textContent || '') + text; this.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text})); this.dispatchEvent(new Event('change', {bubbles:true})); return true; }", [text, replace])) === true;
 	}
 
+	async backendNodeValue(backendNodeId: number): Promise<string | undefined> {
+		const value = await this.withBackendNode(backendNodeId, "function(){ if (!this.isConnected) return undefined; if ('value' in this) return String(this.value ?? ''); return String(this.textContent ?? ''); }");
+		return typeof value === "string" ? value : undefined;
+	}
+
 	async scrollBy(deltaX: number, deltaY: number, backendNodeId?: number): Promise<void> {
 		if (backendNodeId) {
 			await this.withBackendNode(backendNodeId, "function(dx, dy){ this.scrollIntoView({block:'center', inline:'center'}); this.scrollBy(dx, dy); }", [deltaX, deltaY]);
@@ -739,6 +744,10 @@ export async function cdpTypeForContext(contextId: string, backendNodeId: number
 	return (await withCdpContextTab(contextId, async (tab) => {
 		return await tab.typeIntoBackendNode(backendNodeId, text, replace);
 	})) === true;
+}
+
+export async function cdpBackendNodeValueForContext(contextId: string, backendNodeId: number): Promise<string | undefined> {
+	return await withCdpContextTab(contextId, async (tab) => await tab.backendNodeValue(backendNodeId));
 }
 
 export async function cdpScrollForContext(contextId: string, deltaX: number, deltaY: number, backendNodeId?: number): Promise<boolean> {

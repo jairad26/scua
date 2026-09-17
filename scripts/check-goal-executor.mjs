@@ -60,7 +60,11 @@ const adapter = {
 		if (params.stateId === "@r2" && !slowObservationFinished) fastAdvancedBeforeSlow = true;
 		visualIds.push(currentVisualAgentId());
 		await new Promise((resolve) => setTimeout(resolve, 15));
-		return result(`${params.stateId}-next`, { outcome: "worked", verification: { status: "verified" } });
+		return result(`${params.stateId}-next`, {
+			outcome: "worked",
+			verification: { status: "verified" },
+			evidence: { cursorVisuals: [{ overlayRequested: true, overlayPresented: true, overlayRenderer: "cdp", visualAckMs: 3 }] },
+		});
 	},
 	async decide(state, candidates) {
 		decisionStates.push(state);
@@ -83,6 +87,7 @@ assert.equal(parallel.details.peakConcurrency, 3);
 assert.equal(peakObservations, 3, "workers did not independently overlap");
 assert.equal(fastAdvancedBeforeSlow, true, "a fast worker waited at a global phase barrier for a slow worker");
 assert.equal(new Set(visualIds).size, 3, "parallel workers did not receive independent cursor identities");
+assert.equal(parallel.details.tasks.every((task) => task.steps[0]?.cursorOverlays?.presented === 1), true, "cursor presentation acknowledgements were not preserved in goal traces");
 assert.equal(decisionStates.some((state) => state.ui.semanticFacts.some((fact) => fact.label === "Continue")), true, "Jev state omitted non-policy semantic UI facts");
 assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.description?.target?.label === "Continue")), true, "recent action history retained only an unstable candidate ID");
 assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.summary === "press \"Continue\" -> worked")), true, "recent action history omitted its human-readable ordered summary");

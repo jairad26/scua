@@ -72,12 +72,25 @@ export interface GoalStepTrace {
 		executedCount: number;
 		choices: string[];
 	};
+	cursorOverlays?: {
+		requested: number;
+		presented: number;
+		renderers: string[];
+		maxVisualAckMs: number;
+	};
 }
 
 function traceAction(action: UiAction | undefined): Record<string, unknown> | undefined {
 	if (!action) return undefined;
 	const { text, ...safe } = action;
 	return text === undefined ? safe : { ...safe, text: "<redacted>", textLength: text.length };
+}
+
+function executionCursorEvidence(execution: any): Array<Record<string, unknown>> {
+	const direct = execution?.evidence;
+	if (Array.isArray(direct?.cursorVisuals)) return direct.cursorVisuals.filter((item: unknown) => item && typeof item === "object");
+	if (Array.isArray(execution?.steps)) return execution.steps.flatMap((step: unknown) => executionCursorEvidence(step));
+	return direct && typeof direct === "object" && "overlayRequested" in direct ? [direct] : [];
 }
 
 function actionSummary(candidate: JevActionCandidate, outcome?: string): string {
@@ -672,6 +685,15 @@ async function runGoalTask(
 			const execution = actionResult.details?.execution;
 			stepTrace.outcome = execution?.outcome;
 			stepTrace.verification = execution?.verification?.status;
+			const cursorEvidence = executionCursorEvidence(execution);
+			if (cursorEvidence.length) {
+				stepTrace.cursorOverlays = {
+					requested: cursorEvidence.filter((evidence) => evidence.overlayRequested === true).length,
+					presented: cursorEvidence.filter((evidence) => evidence.overlayPresented === true).length,
+					renderers: [...new Set(cursorEvidence.map((evidence) => typeof evidence.overlayRenderer === "string" ? evidence.overlayRenderer : "unknown"))],
+					maxVisualAckMs: Math.max(0, ...cursorEvidence.map((evidence) => typeof evidence.visualAckMs === "number" ? evidence.visualAckMs : 0)),
+				};
+			}
 			const executedCount = Math.max(0, Math.min(executable.length, Number(execution?.actionCount ?? execution?.steps?.length ?? executable.length)));
 			stepTrace.microBatch.executedCount = executedCount;
 			const successorStateId = stateIdFrom(actionResult);
