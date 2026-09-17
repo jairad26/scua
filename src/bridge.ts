@@ -868,7 +868,7 @@ function trimOrUndefined(value: string | undefined): string | undefined {
 }
 
 function normalizeText(value: string | undefined): string {
-	return (value ?? "").trim().toLowerCase();
+	return (value ?? "").normalize("NFKC").replace(/\p{Cf}/gu, "").trim().toLowerCase();
 }
 
 function toBoolean(value: unknown): boolean {

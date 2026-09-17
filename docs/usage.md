@@ -146,9 +146,11 @@ dependent. Named `textValues` are available as complete set-text candidates;
 their content is never copied into the candidate description. A deterministic
 `completion` condition is checked before every model call.
 
-Defaults require Jev confidence of 0.60 and a top-choice margin of 0.12. A
-branch below either threshold performs no action and returns `escalated` with
-the decision evidence. `done` and `escalate` are explicit policy choices;
+Defaults require Jev confidence of 0.40, matching the reference TypeSafe
+computer-use loop. The optional top-choice margin gate defaults to zero and can
+be raised for higher-risk workflows. A branch below either configured threshold
+performs no action and returns `escalated` with the decision evidence. `done`
+and `escalate` are explicit policy choices;
 reaching the per-task step budget also escalates. SCUA does not silently invoke
 a larger model or ask another worker to improvise.
 

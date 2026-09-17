@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createGoalExecutor } from "../src/goal-executor.ts";
+import { createGoalExecutor, goalConditionSatisfied } from "../src/goal-executor.ts";
+import { restoreOutline } from "../src/outline.ts";
 import { currentVisualAgentId } from "../src/control-plane.ts";
 
 function serializedOutline(stateId) {
@@ -17,6 +18,11 @@ function serializedOutline(stateId) {
 		},
 	};
 }
+
+const markedValue = serializedOutline("marked");
+markedValue.root.children[0].role = "AXStaticText";
+markedValue.root.children[0].value = "\u200e0";
+assert.equal(goalConditionSatisfied(restoreOutline(markedValue), { role: "statictext", value: "0" }), true, "platform role or format-control normalization broke exact value verification");
 
 function result(stateId, execution) {
 	return {
@@ -37,6 +43,7 @@ let slowObservationFinished = false;
 let fastAdvancedBeforeSlow = false;
 const observedParams = [];
 const visualIds = [];
+const decisionStates = [];
 let actions = 0;
 const adapter = {
 	async observe(_id, params) {
@@ -56,6 +63,7 @@ const adapter = {
 		return result(`${params.stateId}-next`, { outcome: "worked", verification: { status: "verified" } });
 	},
 	async decide(state, candidates) {
+		decisionStates.push(state);
 		const chosen = state.recentActions.length ? candidates.find((candidate) => candidate.kind === "done") : candidates.find((candidate) => candidate.kind === "action");
 		return { candidate: chosen, confidence: 0.94, margin: 0.72, probabilities: { [chosen.id]: 0.94 }, model: "fake-jev", usage: { inputTokens: 4, outputTokens: 1 }, latencyMs: 1, requestCount: 1, selectionDepth: 1 };
 	},
@@ -75,6 +83,9 @@ assert.equal(parallel.details.peakConcurrency, 3);
 assert.equal(peakObservations, 3, "workers did not independently overlap");
 assert.equal(fastAdvancedBeforeSlow, true, "a fast worker waited at a global phase barrier for a slow worker");
 assert.equal(new Set(visualIds).size, 3, "parallel workers did not receive independent cursor identities");
+assert.equal(decisionStates.some((state) => state.ui.semanticFacts.some((fact) => fact.label === "Continue")), true, "Jev state omitted non-policy semantic UI facts");
+assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.description?.target?.label === "Continue")), true, "recent action history retained only an unstable candidate ID");
+assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.summary === "press \"Continue\" -> worked")), true, "recent action history omitted its human-readable ordered summary");
 
 observedParams.length = 0;
 const handoff = await execute("handoff", {
@@ -97,5 +108,34 @@ const guarded = createGoalExecutor({
 const lowConfidence = await guarded("guard", { goal: "Do something", minConfidence: 0.6, minMargin: 0.1 }, undefined, {});
 assert.equal(lowConfidence.details.tasks[0].status, "escalated");
 assert.equal(unsafeActions, 0, "a low-confidence Jev decision caused a side effect");
+
+function sparseOutline(title) {
+	return {
+		lookId: `look-${title}`,
+		root: {
+			ref: "@e0", role: "RootWebArea", subrole: "", identifier: "", roleDescription: "", placeholder: "", title, description: "", value: "", actions: [],
+			canPress: false, canFocus: false, canSetValue: false, canScroll: false, canIncrement: false, canDecrement: false, isTextInput: false,
+			focused: false, offscreen: false, pictureOnly: false, truncated: false, text: [], children: [],
+		},
+	};
+}
+let settlingObservations = 0;
+let settlingDecisions = 0;
+const settling = createGoalExecutor({
+	observe: async () => {
+		settlingObservations += 1;
+		return settlingObservations === 1 ? result("initial") : { content: [], details: { stateId: "loaded", outline: sparseOutline("Loaded") } };
+	},
+	act: async () => ({ content: [], details: { stateId: "loading", outline: sparseOutline("Loading"), execution: { outcome: "worked" } } }),
+	decide: async (_state, candidates) => {
+		settlingDecisions += 1;
+		const candidate = candidates.find((item) => item.kind === "action");
+		return { candidate, confidence: 0.95, margin: 0.8, probabilities: { [candidate.id]: 0.95 }, model: "fake-jev", usage: { inputTokens: 1, outputTokens: 1 }, latencyMs: 1, requestCount: 1, selectionDepth: 1 };
+	},
+});
+const settled = await settling("settle", { goal: "Navigate", tasks: [{ id: "page", completion: { text: "Loaded" } }] }, undefined, {});
+assert.equal(settled.details.status, "succeeded");
+assert.equal(settlingObservations, 2, "a sparse post-navigation successor was not re-observed");
+assert.equal(settlingDecisions, 1, "Jev was asked to classify a transient sparse loading tree");
 
 console.log(`Goal executor checks passed: ${actions} actions, true overlap, state handoff, distinct cursors, and fail-closed confidence gates.`);

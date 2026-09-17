@@ -174,7 +174,7 @@ async function chooseRound(
 		for (let index = 0; index < groupBatch.length; index += 1) {
 			const group = groupBatch[index];
 			questions[`selection_${index}`] = choice({
-				instruction: "Choose the single action-target pair that most safely advances the task from the exact current UI state. Choose done only when the objective is already satisfied; choose escalate when no listed action is defensible.",
+				instruction: "Choose the single action-target pair that most safely advances the task from the exact current UI state. Follow the ordered recent action summaries. Do not repeat a successful setup action unless the current semantic facts prove it was undone. Choose done only when the objective is already satisfied; choose escalate when no listed action is defensible.",
 			}, criteriaFor(group));
 		}
 		const response = await client.systemOne({ state: state as unknown as EntryType, questions }, { signal });

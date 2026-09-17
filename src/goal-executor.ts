@@ -59,6 +59,21 @@ function traceAction(action: UiAction | undefined): Record<string, unknown> | un
 	return text === undefined ? safe : { ...safe, text: "<redacted>", textLength: text.length };
 }
 
+function actionSummary(candidate: JevActionCandidate, outcome?: string): string {
+	const description = candidate.description && typeof candidate.description === "object" && !Array.isArray(candidate.description)
+		? candidate.description as Record<string, any>
+		: {};
+	const operation = typeof description.operation === "string" ? description.operation : candidate.kind;
+	const target = description.target && typeof description.target === "object"
+		? description.target as Record<string, unknown>
+		: {};
+	const label = typeof target.label === "string" && target.label ? ` ${JSON.stringify(target.label)}` : "";
+	const payload = description.payload && typeof description.payload === "object" && typeof (description.payload as Record<string, unknown>).name === "string"
+		? ` using payload ${JSON.stringify((description.payload as Record<string, unknown>).name)}`
+		: "";
+	return `${operation}${label}${payload}${outcome ? ` -> ${outcome}` : ""}`;
+}
+
 export interface GoalExecutionTrace {
 	tool: "execute_goal";
 	runId: string;
@@ -157,16 +172,27 @@ export function buildGoalCandidates(outline: Outline, task: GoalTask): JevAction
 			add({ action: "keypress", ref: focused.ref, keys }, candidateDescription(focused, "keypress", { keys }));
 		}
 	}
+	if (!task.completion) {
+		candidates.push({ id: "done", kind: "done", description: { operation: "done", meaning: "The task objective is already satisfied in the current UI state. Do not choose merely because progress was made." } });
+	}
 	candidates.push(
-		{ id: "done", kind: "done", description: { operation: "done", meaning: "The task objective is already satisfied in the current UI state. Do not choose merely because progress was made." } },
 		{ id: "wait", kind: "wait", action: { action: "wait", ms: 250 }, description: { operation: "wait", meaning: "The UI is visibly loading or a short delay is the correct next step." } },
-		{ id: "escalate", kind: "escalate", description: { operation: "escalate", meaning: "No listed action-target pair is safe or sufficient; request higher-level reasoning without causing a side effect." } },
+		{ id: "escalate", kind: "escalate", description: { operation: "escalate", meaning: task.completion ? "No listed action-target pair is safe, and the deterministic completion condition is still false." : "No listed action-target pair is safe or sufficient; request higher-level reasoning without causing a side effect." } },
 	);
 	return candidates;
 }
 
 function normalized(value: unknown): string {
-	return typeof value === "string" ? value.toLowerCase().replace(/\s+/g, " ").trim() : "";
+	return typeof value === "string" ? value.normalize("NFKC").replace(/\p{Cf}/gu, "").toLowerCase().replace(/\s+/g, " ").trim() : "";
+}
+
+function normalizedRole(value: unknown): string {
+	const role = normalized(value).replace(/^ax/, "").replace(/[ _-]+/g, "");
+	if (["textbox", "textfield", "textarea", "textview", "searchfield", "editabletext", "securetextfield"].includes(role)) return "textbox";
+	if (["radio", "radiobutton"].includes(role)) return "radio";
+	if (["check", "checkbox"].includes(role)) return "checkbox";
+	if (["menuitem", "menuitemradio", "menuitemcheckbox"].includes(role)) return "menuitem";
+	return role;
 }
 
 function descendants(node: OutlineNode): OutlineNode[] {
@@ -185,7 +211,7 @@ export function goalConditionSatisfied(outline: Outline, condition: UiCondition)
 	const nodes = scope ? descendants(scope) : [];
 	const matches = nodes.some((node) => {
 		if (condition.ref !== undefined && node.ref !== condition.ref && node.wireRef !== condition.ref) return false;
-		if (condition.role !== undefined && normalized(node.role) !== normalized(condition.role)) return false;
+		if (condition.role !== undefined && normalizedRole(node.role) !== normalizedRole(condition.role)) return false;
 		if (condition.value !== undefined && normalized(node.value) !== normalized(condition.value)) return false;
 		if (condition.text !== undefined) {
 			const haystack = normalized([safeLabel(node), node.value, ...node.text.map((item) => item.string)].join(" "));
@@ -243,6 +269,36 @@ function taskDependencyContext(task: GoalTask, results: Map<string, GoalTaskTrac
 	});
 }
 
+function semanticFacts(outline: Outline): Array<Record<string, unknown>> {
+	const facts: Array<Record<string, unknown>> = [];
+	const seen = new Set<string>();
+	for (const node of outline.nodes) {
+		const secure = node.role.toLowerCase().includes("secure") || node.subrole.toLowerCase().includes("secure");
+		const label = safeLabel(node);
+		const text = node.text.map((item) => item.string.trim()).filter(Boolean);
+		const value = node.value.trim();
+		if (!label && !text.length && !value && !node.focused) continue;
+		const fact: Record<string, unknown> = {
+			ref: node.ref,
+			role: node.role || "unknown",
+			label: label || undefined,
+			text: text.length ? text : undefined,
+			focused: node.focused || undefined,
+		};
+		if (node.isTextInput || secure) {
+			fact.input = { empty: value.length === 0, characters: value.length, secure: secure || undefined };
+		} else if (value && value !== label) {
+			fact.value = value;
+		}
+		const key = JSON.stringify(fact);
+		if (!seen.has(key)) {
+			seen.add(key);
+			facts.push(fact);
+		}
+	}
+	return facts;
+}
+
 function uiState(result: ToolResult, outline: Outline, candidateCount: number): Record<string, unknown> {
 	return {
 		application: result.details?.target?.app,
@@ -253,7 +309,22 @@ function uiState(result: ToolResult, outline: Outline, candidateCount: number): 
 		candidateCount,
 		nodeCount: outline.nodes.length,
 		focusedElement: safeLabel(outline.nodes.find((node) => node.focused) ?? outline.root) || undefined,
+		semanticFacts: semanticFacts(outline),
 	};
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new DOMException("The operation was aborted.", "AbortError"));
+			return;
+		}
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener("abort", () => {
+			clearTimeout(timer);
+			reject(new DOMException("The operation was aborted.", "AbortError"));
+		}, { once: true });
+	});
 }
 
 function cancelled(signal?: AbortSignal): boolean {
@@ -356,7 +427,14 @@ async function runGoalTask(
 			stepTrace.verification = execution?.verification?.status;
 			const successorStateId = stateIdFrom(actionResult);
 			stepTrace.successorStateId = successorStateId;
-			recentActions.push({ choice: stepTrace.choice, kind: stepTrace.kind, outcome: stepTrace.outcome, verification: stepTrace.verification });
+				recentActions.push({
+				choice: stepTrace.choice,
+				kind: stepTrace.kind,
+				summary: actionSummary(decision.candidate, stepTrace.outcome),
+				description: decision.candidate.description,
+				outcome: stepTrace.outcome,
+				verification: stepTrace.verification,
+			});
 			if (execution?.outcome === "didnt" || execution?.verification?.status === "failed") {
 				// The successor still carries useful evidence. Let Jev choose a different
 				// action on the next step instead of blindly retrying this one.
@@ -369,6 +447,17 @@ async function runGoalTask(
 				stateId = stateIdFrom(observation) ?? stateId;
 				serialized = outlineFrom(observation);
 				if (!serialized) throw new Error(`Task '${task.id}' could not refresh its successor state.`);
+			}
+			if (execution?.outcome === "worked" && serialized) {
+				for (const settleMs of [100, 200, 400, 800]) {
+					const successorOutline = restoreOutline(serialized);
+					const hasActionableTarget = buildGoalCandidates(successorOutline, task).some((candidate) => candidate.kind === "action");
+					if (hasActionableTarget || task.completion && goalConditionSatisfied(successorOutline, task.completion)) break;
+					await delay(settleMs, signal);
+					observation = await adapter.observe(`${toolCallId}_${task.id}_${step}_settle_${settleMs}`, { stateId, mode: "semantic" }, signal, ctx);
+					stateId = stateIdFrom(observation) ?? stateId;
+					serialized = outlineFrom(observation) ?? serialized;
+				}
 			}
 		}
 		const completedAt = Date.now();
@@ -412,8 +501,8 @@ export function createGoalExecutor(adapter: GoalExecutorAdapter) {
 		const tasks = validateTasks(params.tasks);
 		const maxConcurrency = boundedInteger(params.maxConcurrency, Math.min(8, tasks.length), 1, 16);
 		const thresholds = {
-			minConfidence: boundedProbability(params.minConfidence, 0.6),
-			minMargin: boundedProbability(params.minMargin, 0.12),
+			minConfidence: boundedProbability(params.minConfidence, 0.4),
+			minMargin: boundedProbability(params.minMargin, 0),
 		};
 		const runId = randomUUID();
 		const startedAt = Date.now();
