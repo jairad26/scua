@@ -56,6 +56,13 @@ engine, while SCUA remains the authority. Deterministic callers may bypass
 policy with `act_ui` or `execute_plan`, and an unavailable or uncertain Jev
 call produces an escalation rather than unsafe fallback behavior.
 
+With explicit automatic planning, the policy may first allocate discovered
+roots to typed roles and dependency waves. All per-root questions are batched,
+then deterministic code validates and schedules the resulting DAG. This is a
+bounded dispatch judgment over roots supplied by SCUA; it does not grant Jev
+the ability to invent tools, applications, actions, payloads, or unrestricted
+subgoals.
+
 ## Generic tools, specialized backends
 
 SCUA does not add tools such as `notes.create_note` or

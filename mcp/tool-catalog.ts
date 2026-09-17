@@ -175,10 +175,18 @@ export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"execute_goal",
 		"Execute autonomous goal",
-		"Run a Jev-first autonomous goal over one or more independently scheduled cursor workers. Each Jev call selects one complete action-target pair from the full immutable SCUA state; deterministic leases, state epochs, actions, verification, dependencies, and handoffs remain enforced by SCUA. Low-confidence or unsupported decisions fail closed as escalations.",
+		"Run a Jev-first autonomous goal over one or more independently scheduled cursor workers. Callers may provide an explicit task graph or opt into bounded automatic planning, where Jev assigns eligible roots to typed roles and dependency waves before deterministic validation. Each worker then selects one complete action-target pair from immutable SCUA state; leases, epochs, actions, verification, dependencies, and handoffs remain enforced by SCUA. Low-confidence or unsupported decisions fail closed as escalations.",
 		object({
 			goal: string("Overall goal shared by all workers."),
 			tasks: { type: "array", items: goalTask, minItems: 1, maxItems: 32 },
+			planning: object({
+				mode: { type: "string", const: "automatic" },
+				roots: { type: "array", items: string("Exact @r root allowed for automatic allocation."), uniqueItems: true, maxItems: 16 },
+				excludeApps: { type: "array", items: string("Exact application name the automatic planner must not select."), uniqueItems: true, maxItems: 32 },
+				maxTasks: number("Maximum workers selected by the automatic planner.", { minimum: 1, maximum: 16, default: 6 }),
+				maxWaves: number("Maximum dependency waves in the generated DAG.", { minimum: 1, maximum: 4, default: 3 }),
+			}, ["mode"]),
+			textValues: { type: "object", description: "Named text payloads made available to every automatically planned worker.", additionalProperties: { type: "string" } },
 			maxConcurrency: number("Maximum independently progressing cursor workers.", { minimum: 1, maximum: 16, default: 8 }),
 			minConfidence: number("Minimum Jev confidence required before side effects.", { minimum: 0, maximum: 1, default: 0.4 }),
 			minMargin: number("Optional minimum top-choice probability margin required before side effects.", { minimum: 0, maximum: 1, default: 0 }),

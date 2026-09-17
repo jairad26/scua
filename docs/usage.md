@@ -140,6 +140,30 @@ execute_goal({
 })
 ```
 
+When the relevant open applications are obvious but the caller should not
+manually choose concurrency and dependencies, use bounded automatic planning:
+
+```ts
+execute_goal({
+  goal: "Read the browser result and calculate the requested total",
+  planning: {
+    mode: "automatic",
+    excludeApps: ["Slack", "Notion"],
+    maxTasks: 4,
+    maxWaves: 3
+  },
+  maxConcurrency: 4
+})
+```
+
+The planner considers current controllable roots (or an exact `roots`
+allowlist), asks all root-allocation questions in one Jev call, and maps each
+selected root to `inspect`, `transform`, `communicate`, or `finalize` in a
+dependency wave. Independent wave-zero workers start together. Later waves
+wait for the prior wave. Low-confidence selected roots escalate before any UI
+mutation. Automatic planning does not synthesize free-form text; provide named
+`textValues` or let a generative orchestrator produce content first.
+
 `root` starts from an exact discovered root, `stateId` starts from an existing
 observation, and `stateFrom` hands a predecessor's exact final state to the
 dependent. Named `textValues` are available as complete set-text candidates;

@@ -106,6 +106,7 @@ const guarded = createGoalExecutor({
 	decide: async (_state, candidates) => ({ candidate: candidates[0], confidence: 0.51, margin: 0.01, probabilities: { [candidates[0].id]: 0.51 }, model: "fake-jev", usage: { inputTokens: 1, outputTokens: 1 }, latencyMs: 1, requestCount: 1, selectionDepth: 1 }),
 });
 const lowConfidence = await guarded("guard", { goal: "Do something", minConfidence: 0.6, minMargin: 0.1 }, undefined, {});
+assert.equal(lowConfidence.details.status, "escalated", "an all-escalated worker run was misreported as failed");
 assert.equal(lowConfidence.details.tasks[0].status, "escalated");
 assert.equal(unsafeActions, 0, "a low-confidence Jev decision caused a side effect");
 
@@ -138,4 +139,63 @@ assert.equal(settled.details.status, "succeeded");
 assert.equal(settlingObservations, 2, "a sparse post-navigation successor was not re-observed");
 assert.equal(settlingDecisions, 1, "Jev was asked to classify a transient sparse loading tree");
 
-console.log(`Goal executor checks passed: ${actions} actions, true overlap, state handoff, distinct cursors, and fail-closed confidence gates.`);
+const automaticStarts = [];
+const automatic = createGoalExecutor({
+	findRoots: async () => ({
+		content: [],
+		details: {
+			windows: [
+				{ windowRef: "@r10", app: "Browser", windowTitle: "Research", kind: "browser_page", browserUseAllowed: true },
+				{ windowRef: "@r11", app: "Calculator", windowTitle: "Calculator", kind: "window", browserUseAllowed: true },
+				{ windowRef: "@r12", app: "Slack", windowTitle: "General", kind: "window", browserUseAllowed: true },
+			],
+		},
+	}),
+	observe: async (_id, params) => {
+		automaticStarts.push(params.root ?? params.stateId);
+		return result(params.root ?? params.stateId);
+	},
+	act: async (_id, params) => result(`${params.stateId}-next`, { outcome: "worked", verification: { status: "verified" } }),
+	decide: async (state, candidates) => {
+		const candidate = state.recentActions.length ? candidates.find((item) => item.kind === "done") : candidates.find((item) => item.kind === "action");
+		return { candidate, confidence: 0.95, margin: 0.8, probabilities: { [candidate.id]: 0.95 }, model: "fake-jev", usage: { inputTokens: 1, outputTokens: 1 }, latencyMs: 1, requestCount: 1, selectionDepth: 1 };
+	},
+	plan: async (_goal, roots) => ({
+		selected: [
+			{ ...roots[0], role: "inspect", wave: 0, confidence: 0.95, margin: 0.8, probabilities: { wave_0_inspect: 0.95 } },
+			{ ...roots[1], role: "transform", wave: 1, confidence: 0.94, margin: 0.78, probabilities: { wave_1_transform: 0.94 } },
+		],
+		excluded: [{ id: roots[2].id, app: roots[2].app, title: roots[2].title, confidence: 0.98 }],
+		model: "fake-planner",
+		usage: { inputTokens: 12, outputTokens: 3 },
+		latencyMs: 2,
+	}),
+});
+const automaticallyPlanned = await automatic("automatic", {
+	goal: "Research a value, then calculate with it",
+	planning: { mode: "automatic", excludeApps: ["Notion"], maxTasks: 2, maxWaves: 3 },
+	maxConcurrency: 2,
+}, undefined, {});
+assert.equal(automaticallyPlanned.details.status, "succeeded");
+assert.equal(automaticallyPlanned.details.planning.status, "ready");
+assert.deepEqual(automaticallyPlanned.details.tasks.map((task) => task.id), ["auto-0-browser", "auto-1-calculator"]);
+assert.deepEqual(automaticStarts.slice(0, 2), ["@r10", "@r11"], "automatic dependency waves did not preserve root allocation order");
+assert(automaticallyPlanned.details.tasks[1].startedAt >= automaticallyPlanned.details.tasks[0].completedAt, "wave-one work began before its prerequisite wave completed");
+assert.equal(automaticallyPlanned.details.planning.excluded[0].app, "Slack");
+
+let plannedUnsafeActions = 0;
+const unsafePlan = createGoalExecutor({
+	findRoots: async () => ({ content: [], details: { windows: [{ windowRef: "@r20", app: "Mail", windowTitle: "Inbox", kind: "window", browserUseAllowed: true }] } }),
+	observe: async () => result("unused"),
+	act: async () => { plannedUnsafeActions += 1; return result("unsafe"); },
+	plan: async (_goal, roots) => ({
+		selected: [{ ...roots[0], role: "communicate", wave: 0, confidence: 0.2, margin: 0.01, probabilities: { wave_0_communicate: 0.2 } }],
+		excluded: [], model: "fake-planner", usage: { inputTokens: 1, outputTokens: 1 }, latencyMs: 1,
+	}),
+});
+const unsafePlanning = await unsafePlan("unsafe-plan", { goal: "Send something", planning: { mode: "automatic" }, minConfidence: 0.6 }, undefined, {});
+assert.equal(unsafePlanning.details.status, "escalated");
+assert.equal(unsafePlanning.details.peakConcurrency, 0);
+assert.equal(plannedUnsafeActions, 0, "a low-confidence automatic plan caused a side effect");
+
+console.log(`Goal executor checks passed: ${actions} actions, true overlap, state handoff, automatic task graphs, distinct cursors, and fail-closed confidence gates.`);

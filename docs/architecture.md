@@ -76,6 +76,14 @@ status and the exact successful successor `stateId`; `stateFrom` starts a
 dependent worker from that immutable state. They do not exchange free-form
 agent chat.
 
+An optional bounded planning pass can precede those worker loops. SCUA
+discovers concrete roots and sends one independent allocation question per
+root in a single System One request. Jev may exclude the root or assign it one
+of four roles in one of up to four dependency waves. Deterministic code then
+applies allowlists, application exclusions, task-count bounds, confidence and
+margin gates, wave normalization, DAG validation, and scheduling. The policy
+cannot create unknown roots, arbitrary actions, free-form objectives, or text.
+
 Jev chooses one complete pair—such as `press @e12` or `set payload title on
 @e7`—rather than independently predicting an action and a target. Large trees
 are not truncated to fit one Choice question: candidates are reduced through

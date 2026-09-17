@@ -146,9 +146,26 @@ export interface GoalTask {
 	context?: Record<string, unknown>;
 }
 
+export interface GoalPlanningParams {
+	/** Ask Jev to allocate discovered UI roots into a bounded execution DAG. */
+	mode: "automatic";
+	/** Optional exact @r allowlist. When omitted, current controllable roots are considered. */
+	roots?: RootSelector[];
+	/** Applications which must never be selected by the automatic planner. */
+	excludeApps?: string[];
+	/** Maximum roots selected for autonomous work. */
+	maxTasks?: number;
+	/** Maximum dependency waves in the generated DAG. */
+	maxWaves?: number;
+}
+
 export interface ExecuteGoalParams {
 	goal: string;
 	tasks?: GoalTask[];
+	/** Opt-in bounded root allocation. Explicit tasks and automatic planning are mutually exclusive. */
+	planning?: GoalPlanningParams;
+	/** Named payloads made available to every automatically planned worker. */
+	textValues?: Record<string, string>;
 	maxConcurrency?: number;
 	minConfidence?: number;
 	minMargin?: number;

@@ -57,6 +57,35 @@ export interface JevDecision {
 	selectionDepth: number;
 }
 
+export type JevTaskRole = "inspect" | "transform" | "communicate" | "finalize";
+
+export interface JevPlanningRoot {
+	id: string;
+	root: string;
+	stateId?: string;
+	app: string;
+	title: string;
+	kind: string;
+	url?: string;
+	semanticFacts?: Array<Record<string, unknown>>;
+}
+
+export interface JevPlannedRoot extends JevPlanningRoot {
+	role: JevTaskRole;
+	wave: number;
+	confidence: number;
+	margin: number;
+	probabilities: Record<string, number>;
+}
+
+export interface JevTaskPlanDecision {
+	selected: JevPlannedRoot[];
+	excluded: Array<{ id: string; app: string; title: string; confidence: number }>;
+	model: string;
+	usage: { inputTokens: number; outputTokens: number };
+	latencyMs: number;
+}
+
 let cachedApiKey: string | undefined;
 let cachedClient: JevPolicyClient | undefined;
 let testClientFactory: (() => JevPolicyClient) | undefined;
@@ -135,6 +164,87 @@ function criteriaFor(candidates: JevActionCandidate[]): Record<string, EntryType
 function decisionMargin(probabilities: Record<string, number>): number {
 	const values = Object.values(probabilities).filter(Number.isFinite).sort((a, b) => b - a);
 	return Math.max(0, (values[0] ?? 0) - (values[1] ?? 0));
+}
+
+function planningCriteria(maxWaves: number): Record<string, EntryType> {
+	const criteria: Record<string, EntryType> = {
+		exclude: {
+			meaning: "Do not create a worker for this root.",
+			when: "The root is irrelevant, redundant, unsafe, or the overall goal does not explicitly require work in this application.",
+		},
+	};
+	const roles: Array<[JevTaskRole, string]> = [
+		["inspect", "Read or extract facts without changing application content."],
+		["transform", "Calculate, create, edit, or otherwise transform content in this application."],
+		["communicate", "Deliver or share a result only when the overall goal explicitly requests communication."],
+		["finalize", "Verify or consolidate work produced by earlier waves."],
+	];
+	for (let wave = 0; wave < maxWaves; wave += 1) {
+		for (const [role, meaning] of roles) {
+			criteria[`wave_${wave}_${role}`] = {
+				meaning,
+				wave,
+				dependency: wave === 0
+					? "This contribution can begin immediately and independently."
+					: `This contribution requires the relevant results of wave ${wave - 1} before it can begin.`,
+			};
+		}
+	}
+	return criteria;
+}
+
+/** Allocate already-discovered roots into a small dependency graph. This is a
+ * typed scheduling judgment, not unconstrained task generation: code owns the
+ * candidate roots, roles, waves, validation, and side effects. */
+export async function planGoalTaskGraph(
+	goal: string,
+	roots: JevPlanningRoot[],
+	options: { maxWaves: number; maxTasks?: number; signal?: AbortSignal; client?: JevPolicyClient },
+): Promise<JevTaskPlanDecision> {
+	if (!roots.length) throw new Error("Automatic goal planning requires at least one observable root.");
+	if (roots.length > MAX_QUESTIONS_PER_REQUEST) throw new Error(`Automatic goal planning supports at most ${MAX_QUESTIONS_PER_REQUEST} candidate roots.`);
+	const maxWaves = Math.max(1, Math.min(4, Math.trunc(options.maxWaves)));
+	const maxTasks = Math.max(1, Math.min(16, Math.trunc(options.maxTasks ?? roots.length)));
+	const client = options.client ?? await defaultClient();
+	const criteria = planningCriteria(maxWaves);
+	const questions: Record<string, ReturnType<typeof choice>> = {};
+	for (const root of roots) {
+		questions[`root_${root.id}`] = choice({
+			instruction: `Decide whether root ${root.id} should receive one of at most ${maxTasks} workers for the overall goal, and if so assign its earliest safe execution wave and bounded role. Prefer the smallest sufficient set of roots. Do not select an application merely because it is open. Wave 0 is immediately parallel; each later wave waits for every selected worker in the previous wave. Choose communicate only when the goal explicitly asks to send or publish something. Choose exclude when this root cannot materially advance the goal from its supplied state.`,
+		}, criteria);
+	}
+	const startedAt = performance.now();
+	const response = await client.systemOne({
+		state: { goal, roots } as unknown as EntryType,
+		questions,
+	}, { signal: options.signal });
+	const selected: JevPlannedRoot[] = [];
+	const excluded: JevTaskPlanDecision["excluded"] = [];
+	for (const root of roots) {
+		const answer = response.answers[`root_${root.id}`];
+		if (!answer || typeof answer.choice !== "string") throw new Error(`TypeSafe omitted the planning answer for root '${root.id}'.`);
+		if (answer.choice === "exclude") {
+			excluded.push({ id: root.id, app: root.app, title: root.title, confidence: answer.confidence });
+			continue;
+		}
+		const match = /^wave_(\d+)_(inspect|transform|communicate|finalize)$/.exec(answer.choice);
+		if (!match) throw new Error(`TypeSafe returned unsupported planning choice '${answer.choice}'.`);
+		selected.push({
+			...root,
+			wave: Number(match[1]),
+			role: match[2] as JevTaskRole,
+			confidence: answer.confidence,
+			margin: decisionMargin(answer.probabilities),
+			probabilities: answer.probabilities,
+		});
+	}
+	return {
+		selected,
+		excluded,
+		model: response.model,
+		usage: { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens },
+		latencyMs: Math.round((performance.now() - startedAt) * 10) / 10,
+	};
 }
 
 function batches<T>(values: T[], size: number): T[][] {

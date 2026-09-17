@@ -53,6 +53,7 @@ type ToolExecutor = (
 ) => Promise<{ content: Array<{ type: string; [key: string]: unknown }>; details?: unknown }>;
 
 const runAutonomousGoal = createGoalExecutor({
+	findRoots: async (toolCallId, params, signal, ctx) => await (executeFind as unknown as ToolExecutor)(toolCallId, params, signal, undefined, ctx) as any,
 	observe: async (toolCallId, params, signal, ctx) => await (executeObserve as unknown as ToolExecutor)(toolCallId, params, signal, undefined, ctx) as any,
 	act: async (toolCallId, params, signal, ctx) => await (executeAct as unknown as ToolExecutor)(toolCallId, params, signal, undefined, ctx) as any,
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { selectGoalAction } from "../src/jev-policy.ts";
+import { planGoalTaskGraph, selectGoalAction } from "../src/jev-policy.ts";
 
 const baseState = {
 	goal: "Complete the task",
@@ -66,4 +66,22 @@ for (const call of largeClient.calls) {
 for (let index = 0; index < 520; index += 1) assert(surfaced.has(`a${index}`), `large-tree selection silently omitted a${index}`);
 assert(surfaced.has("done") && surfaced.has("wait") && surfaced.has("escalate"), "terminal choices were not retained during hierarchical selection");
 
-console.log("Jev policy checks passed: complete pairs, calibrated metadata, and uncapped hierarchical selection.");
+const plannerClient = fakeClient((_labels, _question, name) => {
+	if (name === "root_r0") return "wave_0_inspect";
+	if (name === "root_r1") return "wave_1_transform";
+	return "exclude";
+});
+const plan = await planGoalTaskGraph("Research a fact and calculate a result", [
+	{ id: "r0", root: "@r1", app: "Browser", title: "Research", kind: "browser_page", url: "https://example.com" },
+	{ id: "r1", root: "@r2", app: "Calculator", title: "Calculator", kind: "window" },
+	{ id: "r2", root: "@r3", app: "Slack", title: "General", kind: "window" },
+], { maxWaves: 3, maxTasks: 2, client: plannerClient });
+assert.deepEqual(plan.selected.map(({ app, role, wave }) => ({ app, role, wave })), [
+	{ app: "Browser", role: "inspect", wave: 0 },
+	{ app: "Calculator", role: "transform", wave: 1 },
+]);
+assert.deepEqual(plan.excluded.map(({ app }) => app), ["Slack"]);
+assert.equal(plannerClient.calls.length, 1, "independent root-allocation questions were not batched into one System One request");
+assert.equal(Object.keys(plannerClient.calls[0].questions).length, 3);
+
+console.log("Jev policy checks passed: complete pairs, calibrated metadata, uncapped hierarchical selection, and batched task-graph allocation.");

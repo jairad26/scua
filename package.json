@@ -83,6 +83,7 @@
 		"test:action-plan": "tsx scripts/check-action-plan.mjs",
 		"test:jev-policy": "tsx scripts/check-jev-policy.mjs",
 		"test:goal-executor": "tsx scripts/check-goal-executor.mjs",
+		"test:auto-planner-live": "SCUA_AUTO_PLANNER_LIVE=1 node scripts/check-auto-planner-live.mjs",
 		"test:user-activity": "tsx scripts/check-user-activity.mjs",
 		"test:cdp": "tsx scripts/check-cdp-runtime.mjs",
 		"test:chrome-extension": "node scripts/check-chrome-extension.mjs",

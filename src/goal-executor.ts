@@ -3,7 +3,15 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ExecuteGoalParams, GoalTask, UiAction, UiCondition } from "./contract.ts";
 import { runAsVisualAgent } from "./control-plane.ts";
 import { outlineNodeLabel, restoreOutline, type Outline, type OutlineNode, type SerializedOutline } from "./outline.ts";
-import { selectGoalAction, type JevActionCandidate, type JevDecision, type JevDecisionState } from "./jev-policy.ts";
+import {
+	planGoalTaskGraph,
+	selectGoalAction,
+	type JevActionCandidate,
+	type JevDecision,
+	type JevDecisionState,
+	type JevPlanningRoot,
+	type JevTaskPlanDecision,
+} from "./jev-policy.ts";
 
 interface ToolResult {
 	content: Array<{ type: string; [key: string]: unknown }>;
@@ -11,9 +19,11 @@ interface ToolResult {
 }
 
 export interface GoalExecutorAdapter {
+	findRoots?(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ToolResult>;
 	observe(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ToolResult>;
 	act(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ToolResult>;
 	decide?(state: JevDecisionState, candidates: JevActionCandidate[], signal?: AbortSignal): Promise<JevDecision>;
+	plan?(goal: string, roots: JevPlanningRoot[], options: { maxWaves: number; maxTasks: number; signal?: AbortSignal }): Promise<JevTaskPlanDecision>;
 }
 
 type GoalTaskStatus = "succeeded" | "failed" | "blocked" | "escalated" | "cancelled";
@@ -78,12 +88,35 @@ export interface GoalExecutionTrace {
 	tool: "execute_goal";
 	runId: string;
 	goal: string;
-	status: "succeeded" | "partial" | "failed" | "cancelled";
+	status: "succeeded" | "partial" | "failed" | "escalated" | "cancelled";
 	startedAt: number;
 	completedAt: number;
 	durationMs: number;
 	peakConcurrency: number;
 	tasks: GoalTaskTrace[];
+	planning?: GoalPlanningTrace;
+}
+
+export interface GoalPlanningTrace {
+	mode: "automatic";
+	status: "ready" | "escalated";
+	candidateCount: number;
+	selected: Array<{
+		taskId: string;
+		root: string;
+		app: string;
+		title: string;
+		role: string;
+		wave: number;
+		confidence: number;
+		margin: number;
+	}>;
+	excluded: Array<{ rootId: string; app: string; title: string; confidence: number }>;
+	omittedDueToLimit: string[];
+	model: string;
+	latencyMs: number;
+	usage: { inputTokens: number; outputTokens: number };
+	reason?: string;
 }
 
 function nonEmpty(value: unknown): string | undefined {
@@ -96,6 +129,145 @@ function boundedInteger(value: unknown, fallback: number, minimum: number, maxim
 
 function boundedProbability(value: unknown, fallback: number): number {
 	return Number.isFinite(value) ? Math.max(0, Math.min(1, Number(value))) : fallback;
+}
+
+function normalizedName(value: unknown): string {
+	return typeof value === "string" ? value.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim() : "";
+}
+
+function taskIdPart(value: string): string {
+	return value.normalize("NFKD").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 28) || "root";
+}
+
+function automaticObjective(goal: string, role: string, app: string, title: string): string {
+	const target = `${app} window ${JSON.stringify(title)}`;
+	const ownership = `Within the overall goal ${JSON.stringify(goal)}, complete only the requirement explicitly associated with ${target}. Mark this worker done as soon as that application-specific requirement is visibly satisfied; other workers own the other applications.`;
+	if (role === "inspect") return `${ownership} Inspect and read the relevant evidence without changing application content.`;
+	if (role === "transform") return `${ownership} Calculate, create, edit, or transform the required content in this application.`;
+	if (role === "communicate") return `${ownership} Deliver only the result explicitly requested by the goal, and verify the recipient or destination before committing.`;
+	return `${ownership} Verify or consolidate the relevant work produced by earlier execution waves.`;
+}
+
+interface AutomaticPlanResult {
+	tasks: GoalTask[];
+	trace: GoalPlanningTrace;
+}
+
+async function automaticGoalPlan(
+	goal: string,
+	params: ExecuteGoalParams,
+	adapter: GoalExecutorAdapter,
+	toolCallId: string,
+	ctx: ExtensionContext,
+	thresholds: { minConfidence: number; minMargin: number },
+	signal?: AbortSignal,
+): Promise<AutomaticPlanResult> {
+	if (params.tasks?.length) throw new Error("execute_goal cannot combine explicit tasks with automatic planning.");
+	const planning = params.planning!;
+	const maxTasks = boundedInteger(planning.maxTasks, 6, 1, 16);
+	const maxWaves = boundedInteger(planning.maxWaves, 3, 1, 4);
+	const excludedApps = new Set((planning.excludeApps ?? []).map(normalizedName).filter(Boolean));
+	let candidates: JevPlanningRoot[];
+	if (planning.roots?.length) {
+		if (planning.roots.length > 16) throw new Error("Automatic planning accepts at most 16 allowlisted roots.");
+		const snapshots = await Promise.all(planning.roots.map(async (root, index) => {
+			const exactRoot = String(root);
+			const observation = await adapter.observe(`${toolCallId}_plan_root_${index}`, { root: exactRoot, mode: "semantic" }, signal, ctx);
+			const stateId = stateIdFrom(observation);
+			const app = String(observation.details?.target?.app ?? (observation.details?.root?.kind === "browser_page" ? "Browser" : "Unknown App"));
+			if (!stateId || !outlineFrom(observation)) throw new Error(`Automatic planning root '${exactRoot}' could not produce a complete immutable observation.`);
+			return {
+				id: `r${index}`,
+				root: exactRoot,
+				stateId,
+				app,
+				title: String(observation.details?.target?.windowTitle ?? observation.details?.root?.title ?? "(untitled)"),
+				kind: String(observation.details?.root?.kind ?? "window"),
+				...(typeof observation.details?.root?.url === "string" ? { url: observation.details.root.url } : {}),
+			} satisfies JevPlanningRoot;
+		}));
+		candidates = snapshots.filter((candidate) => !excludedApps.has(normalizedName(candidate.app)));
+	} else {
+		if (!adapter.findRoots) throw new Error("Automatic goal planning is unavailable because this runtime cannot discover roots.");
+		const found = await adapter.findRoots(`${toolCallId}_plan_roots`, {}, signal, ctx);
+		const windows = Array.isArray(found.details?.windows) ? found.details.windows as Array<Record<string, unknown>> : [];
+		candidates = windows
+			.filter((window) => {
+				const root = String(window.windowRef ?? "");
+				const app = String(window.app ?? "Unknown App");
+				return root && !excludedApps.has(normalizedName(app)) && window.browserUseAllowed !== false;
+			})
+			.slice(0, 16)
+			.map((window, index) => ({
+				id: `r${index}`,
+				root: String(window.windowRef),
+				app: String(window.app ?? "Unknown App"),
+				title: String(window.windowTitle ?? "(untitled)"),
+				kind: String(window.kind ?? "window"),
+				...(typeof window.url === "string" ? { url: window.url } : {}),
+			}));
+	}
+	if (!candidates.length) throw new Error("Automatic goal planning found no eligible roots after applying its allowlist and exclusions.");
+	const decision = adapter.plan
+		? await adapter.plan(goal, candidates, { maxWaves, maxTasks, signal })
+		: await planGoalTaskGraph(goal, candidates, { maxWaves, maxTasks, signal });
+	const ranked = [...decision.selected].sort((a, b) => b.confidence - a.confidence || b.margin - a.margin || a.wave - b.wave || a.id.localeCompare(b.id));
+	const retained = ranked.slice(0, maxTasks);
+	const omittedDueToLimit = ranked.slice(maxTasks).map((root) => root.root);
+	const unsafe = retained.filter((root) => root.confidence < thresholds.minConfidence || root.margin < thresholds.minMargin);
+	const waves = [...new Set(retained.map((root) => root.wave))].sort((a, b) => a - b);
+	const normalizedWave = new Map(waves.map((wave, index) => [wave, index]));
+	const ids = new Map(retained.map((root, index) => [root.id, `auto-${index}-${taskIdPart(root.app)}`]));
+	const tasks = retained.map((root) => {
+		const wave = normalizedWave.get(root.wave) ?? 0;
+		const previous = wave === 0 ? [] : retained.filter((candidate) => normalizedWave.get(candidate.wave) === wave - 1).map((candidate) => ids.get(candidate.id)!);
+		return {
+			id: ids.get(root.id)!,
+			objective: automaticObjective(goal, root.role, root.app, root.title),
+			...(root.stateId ? { stateId: root.stateId } : { root: root.root }),
+			dependsOn: previous,
+			textValues: params.textValues,
+			context: {
+				automaticPlan: true,
+				assignedApplication: root.app,
+				assignedWindow: root.title,
+				role: root.role,
+				wave,
+				plannerConfidence: root.confidence,
+				plannerMargin: root.margin,
+			},
+		} satisfies GoalTask;
+	});
+	const selected = retained.map((root) => ({
+		taskId: ids.get(root.id)!,
+		root: root.root,
+		app: root.app,
+		title: root.title,
+		role: root.role,
+		wave: normalizedWave.get(root.wave) ?? 0,
+		confidence: root.confidence,
+		margin: root.margin,
+	}));
+	const reason = !retained.length
+		? "Jev found no current root which could materially advance the goal."
+		: unsafe.length
+			? `Automatic plan contained ${unsafe.length} selected root${unsafe.length === 1 ? "" : "s"} below the configured confidence gates.`
+			: undefined;
+	return {
+		tasks: reason ? [] : tasks,
+		trace: {
+			mode: "automatic",
+			status: reason ? "escalated" : "ready",
+			candidateCount: candidates.length,
+			selected,
+			excluded: decision.excluded.map((root) => ({ rootId: root.id, app: root.app, title: root.title, confidence: root.confidence })),
+			omittedDueToLimit,
+			model: decision.model,
+			latencyMs: decision.latencyMs,
+			usage: decision.usage,
+			...(reason ? { reason } : {}),
+		},
+	};
 }
 
 function stateIdFrom(result: ToolResult): string | undefined {
@@ -173,11 +345,11 @@ export function buildGoalCandidates(outline: Outline, task: GoalTask): JevAction
 		}
 	}
 	if (!task.completion) {
-		candidates.push({ id: "done", kind: "done", description: { operation: "done", meaning: "The task objective is already satisfied in the current UI state. Do not choose merely because progress was made." } });
+		candidates.push({ id: "done", kind: "done", description: { operation: "done", meaning: "This worker's application-specific objective is visibly satisfied in the current UI state. Other parallel workers own their application-specific portions, so they do not need to be complete. Do not choose merely because progress was made." } });
 	}
 	candidates.push(
 		{ id: "wait", kind: "wait", action: { action: "wait", ms: 250 }, description: { operation: "wait", meaning: "The UI is visibly loading or a short delay is the correct next step." } },
-		{ id: "escalate", kind: "escalate", description: { operation: "escalate", meaning: task.completion ? "No listed action-target pair is safe, and the deterministic completion condition is still false." : "No listed action-target pair is safe or sufficient; request higher-level reasoning without causing a side effect." } },
+		{ id: "escalate", kind: "escalate", description: { operation: "escalate", meaning: task.completion ? "No listed action-target pair is safe, and the deterministic completion condition is still false." : "This worker's application-specific objective is not yet satisfied, but no listed action-target pair is safe or sufficient; request higher-level reasoning without causing a side effect." } },
 	);
 	return candidates;
 }
@@ -498,14 +670,40 @@ export function createGoalExecutor(adapter: GoalExecutorAdapter) {
 	): Promise<ToolResult> {
 		const goal = nonEmpty(params?.goal);
 		if (!goal) throw new Error("execute_goal.goal must be non-empty.");
-		const tasks = validateTasks(params.tasks);
-		const maxConcurrency = boundedInteger(params.maxConcurrency, Math.min(8, tasks.length), 1, 16);
 		const thresholds = {
 			minConfidence: boundedProbability(params.minConfidence, 0.4),
 			minMargin: boundedProbability(params.minMargin, 0),
 		};
 		const runId = randomUUID();
 		const startedAt = Date.now();
+		let planningTrace: GoalPlanningTrace | undefined;
+		let rawTasks = params.tasks;
+		if (params.planning?.mode === "automatic") {
+			const planned = await automaticGoalPlan(goal, params, adapter, toolCallId, ctx, thresholds, signal);
+			planningTrace = planned.trace;
+			if (planningTrace.status === "escalated") {
+				const completedAt = Date.now();
+				const trace: GoalExecutionTrace = {
+					tool: "execute_goal",
+					runId,
+					goal,
+					status: "escalated",
+					startedAt,
+					completedAt,
+					durationMs: completedAt - startedAt,
+					peakConcurrency: 0,
+					tasks: [],
+					planning: planningTrace,
+				};
+				return {
+					content: [{ type: "text", text: `Goal escalated during automatic planning in ${trace.durationMs}ms: ${planningTrace.reason}` }],
+					details: trace,
+				};
+			}
+			rawTasks = planned.tasks;
+		}
+		const tasks = validateTasks(rawTasks);
+		const maxConcurrency = boundedInteger(params.maxConcurrency, Math.min(8, tasks.length), 1, 16);
 		const pending = new Map(tasks.map((task) => [task.id, task]));
 		const results = new Map<string, GoalTaskTrace>();
 		const active = new Map<string, Promise<GoalTaskTrace>>();
@@ -540,7 +738,15 @@ export function createGoalExecutor(adapter: GoalExecutorAdapter) {
 		const ordered = tasks.map((task) => results.get(task.id)!);
 		const succeeded = ordered.filter((task) => task.status === "succeeded").length;
 		const cancelledCount = ordered.filter((task) => task.status === "cancelled").length;
-		const status: GoalExecutionTrace["status"] = cancelledCount ? "cancelled" : succeeded === ordered.length ? "succeeded" : succeeded ? "partial" : "failed";
+		const escalated = ordered.filter((task) => task.status === "escalated").length;
+		const failed = ordered.filter((task) => task.status === "failed" || task.status === "blocked").length;
+		const status: GoalExecutionTrace["status"] = cancelledCount
+			? "cancelled"
+			: succeeded === ordered.length
+				? "succeeded"
+				: succeeded
+					? "partial"
+					: escalated && !failed ? "escalated" : "failed";
 		const trace: GoalExecutionTrace = {
 			tool: "execute_goal",
 			runId,
@@ -551,9 +757,8 @@ export function createGoalExecutor(adapter: GoalExecutorAdapter) {
 			durationMs: completedAt - startedAt,
 			peakConcurrency,
 			tasks: ordered,
+			...(planningTrace ? { planning: planningTrace } : {}),
 		};
-		const escalated = ordered.filter((task) => task.status === "escalated").length;
-		const failed = ordered.filter((task) => task.status === "failed" || task.status === "blocked").length;
 		return {
 			content: [{ type: "text", text: `Goal ${status} in ${trace.durationMs}ms: ${succeeded}/${ordered.length} tasks succeeded, ${escalated} escalated, ${failed} failed or blocked; peak concurrency ${peakConcurrency}.` }],
 			details: trace,

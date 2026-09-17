@@ -89,6 +89,15 @@ soon as their own observation or action completes rather than freezing at
 global step barriers. Low-confidence, low-margin, unsupported, and exhausted
 branches stop as typed escalations before another side effect.
 
+Callers can also opt into `planning: { mode: "automatic" }`. SCUA discovers
+eligible roots, batches one typed allocation judgment per root into a single
+Jev request, and assigns the smallest relevant set to bounded roles and
+dependency waves. Code validates the generated DAG, applies application
+exclusions and confidence gates, and only then starts workers. This is
+automatic scheduling over concrete roots—not unconstrained subgoal or prose
+generation—so requests needing novel content still belong in Codex, an RLM,
+or another generative orchestrator above SCUA.
+
 Plan actions may use semantic `selector` targets instead of future `@e` refs.
 Each selector is resolved against that node's exact predecessor state, so a
 single plan can open a menu, target the menu item that appears, and then edit
