@@ -44,6 +44,9 @@ action-target judgments while keeping all side effects inside that runtime.
   terminal choices across uncapped hierarchical UI selection, hands exact
   successor states through typed dependencies, and fails closed below explicit
   confidence and probability-margin gates.
+- Stable compact control banks compile exact literal action horizons into one
+  checked `act_ui` transaction without a model call; ambiguous and dynamic
+  interfaces remain confidence-gated Jev single steps.
 - Optional automatic planning discovers eligible roots, batches their typed
   role/wave allocation in one Jev request, validates the resulting DAG, and
   fails closed before side effects when the plan is uncertain.

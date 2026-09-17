@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { planGoalTaskGraph, selectGoalAction } from "../src/jev-policy.ts";
+import { planGoalTaskGraph, selectGoalAction, selectGoalActionSequence } from "../src/jev-policy.ts";
 
 const baseState = {
 	goal: "Complete the task",
@@ -41,6 +41,34 @@ const simple = await selectGoalAction(baseState, [
 assert.equal(simple.candidate.id, "a1");
 assert.equal(simple.margin > 0.8, true);
 assert.equal(simple.requestCount, 1);
+
+const sequenceClient = fakeClient((labels) => labels[0]);
+const sequenceLabels = ["1", "2", "Add", "3", "0", "Equals"];
+const sequenceCandidates = sequenceLabels.map((label, index) => ({
+	id: `a${index}`,
+	kind: "action",
+	action: { action: "press", ref: `@e${index}` },
+	description: { operation: "press", target: { label } },
+	microBatchStable: true,
+}));
+sequenceCandidates.push(
+	{ id: "done", kind: "done", description: { operation: "done" } },
+	{ id: "escalate", kind: "escalate", description: { operation: "escalate" } },
+);
+const sequence = await selectGoalActionSequence({ ...baseState, objective: "Calculate 12 + 30" }, sequenceCandidates, { maxActions: 6, client: sequenceClient });
+assert.deepEqual(sequence.decisions.map((decision) => decision.candidate.id), ["a0", "a1", "a2", "a3", "a4", "a5"]);
+assert.equal(sequence.compiledSequence, true);
+assert.equal(sequence.requestCount, 0);
+assert.equal(sequenceClient.calls.length, 0, "an exact stable sequence unnecessarily called TypeSafe");
+
+const completedSequenceClient = fakeClient((labels) => labels.includes("done") ? "done" : labels[0]);
+const afterSequence = await selectGoalActionSequence({
+	...baseState,
+	objective: "Calculate 12 + 30",
+	recentActions: sequenceLabels.map((label) => ({ description: { target: { label } }, outcome: "unknown" })),
+}, sequenceCandidates, { maxActions: 6, client: completedSequenceClient });
+assert.equal(afterSequence.decisions[0].candidate.id, "done", "a delivered stable sequence was compiled a second time");
+assert.equal(completedSequenceClient.calls.length, 1);
 
 const largeCandidates = Array.from({ length: 520 }, (_, index) => ({
 	id: `a${index}`,

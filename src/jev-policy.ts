@@ -13,6 +13,8 @@ export interface JevActionCandidate {
 	kind: "action" | "done" | "wait" | "escalate";
 	description: EntryType;
 	action?: UiAction;
+	/** Deterministic executor classification; never inferred by Jev. */
+	microBatchStable?: boolean;
 }
 
 export interface JevDecisionState {
@@ -55,6 +57,16 @@ export interface JevDecision {
 	latencyMs: number;
 	requestCount: number;
 	selectionDepth: number;
+}
+
+export interface JevActionSequenceDecision {
+	decisions: Array<Pick<JevDecision, "candidate" | "confidence" | "margin" | "probabilities">>;
+	model: string;
+	usage: JevDecision["usage"];
+	latencyMs: number;
+	requestCount: number;
+	selectionDepth: number;
+	compiledSequence: boolean;
 }
 
 export type JevTaskRole = "inspect" | "transform" | "communicate" | "finalize";
@@ -339,5 +351,114 @@ export async function selectGoalAction(
 		latencyMs: Math.round((performance.now() - startedAt) * 10) / 10,
 		requestCount: accumulator.requestCount,
 		selectionDepth: depth + 1,
+	};
+}
+
+function validateCandidateIds(candidates: JevActionCandidate[]): void {
+	const ids = new Set<string>();
+	for (const candidate of candidates) {
+		if (!candidate.id || ids.has(candidate.id)) throw new Error(`Jev candidate IDs must be unique and non-empty; received '${candidate.id}'.`);
+		ids.add(candidate.id);
+	}
+}
+
+function stableMicroBatchCandidates(candidates: JevActionCandidate[]): JevActionCandidate[] {
+	return candidates.filter((candidate) => candidate.kind === "action" && candidate.action?.action === "press" && candidate.microBatchStable === true);
+}
+
+function descriptionTargetLabel(description: unknown): string {
+	if (!description || typeof description !== "object" || Array.isArray(description)) return "";
+	const target = (description as Record<string, unknown>).target;
+	if (!target || typeof target !== "object" || Array.isArray(target)) return "";
+	const label = (target as Record<string, unknown>).label;
+	return typeof label === "string" ? label.normalize("NFKC").replace(/\s+/g, " ").trim() : "";
+}
+
+function candidateTargetLabel(candidate: JevActionCandidate): string {
+	return descriptionTargetLabel(candidate.description);
+}
+
+function canonicalControl(label: string): string | undefined {
+	const value = label.toLowerCase().trim();
+	if (/^\d$/.test(value)) return value;
+	const words: Record<string, string> = {
+		zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9",
+		".": ".", decimal: ".", point: ".",
+		"+": "+", add: "+", plus: "+",
+		"-": "-", minus: "-", subtract: "-",
+		"*": "*", "×": "*", multiply: "*", times: "*",
+		"/": "/", "÷": "/", divide: "/",
+		"=": "=", equals: "=",
+		c: "clear", ac: "clear", ce: "clear", clear: "clear", "all clear": "clear",
+	};
+	return words[value];
+}
+
+function compiledStableSequence(state: JevDecisionState, candidates: JevActionCandidate[], maxActions: number): JevActionCandidate[] | undefined {
+	const byControl = new Map<string, JevActionCandidate>();
+	const ambiguous = new Set<string>();
+	for (const candidate of stableMicroBatchCandidates(candidates)) {
+		const control = canonicalControl(candidateTargetLabel(candidate));
+		if (!control) continue;
+		if (byControl.has(control)) ambiguous.add(control);
+		else byControl.set(control, candidate);
+	}
+	for (const control of ambiguous) byControl.delete(control);
+	const objective = state.objective.toLowerCase()
+		.replace(/\bmultiplied\s+by\b|\btimes\b/g, " * ")
+		.replace(/\bdivided\s+by\b/g, " / ")
+		.replace(/\bplus\b/g, " + ")
+		.replace(/\bminus\b/g, " - ");
+	const expression = /(?:^|\D)(\d+(?:\.\d+)?)\s*([+\-*/])\s*(\d+(?:\.\d+)?)(?:\D|$)/.exec(objective);
+	if (!expression) return undefined;
+	const tokens = [...expression[1], expression[2], ...expression[3], "="];
+	const alreadyCleared = state.recentActions.some((action) => typeof action.summary === "string" && /\b(?:all\s+)?clear\b/i.test(action.summary));
+	if (/\b(?:clear|reset|start\s+(?:fresh|over))\b/.test(objective) && !alreadyCleared) tokens.unshift("clear");
+	if (tokens.length < 2 || tokens.length > maxActions) return undefined;
+	const recentControls = state.recentActions.slice(-tokens.length).map((action) => canonicalControl(descriptionTargetLabel(action.description)));
+	if (recentControls.length === tokens.length && recentControls.every((control, index) => control === tokens[index])) return undefined;
+	const sequence = tokens.map((token) => byControl.get(token));
+	return sequence.every((candidate): candidate is JevActionCandidate => Boolean(candidate)) ? sequence : undefined;
+}
+
+/** Compile one complete ordered sequence rather than independently predicting
+ * positions which cannot see one another's answers. Exact objective literals
+ * and stable control labels are deterministic work; Jev remains the fallback
+ * for ambiguous single-step choices. */
+export async function selectGoalActionSequence(
+	state: JevDecisionState,
+	candidates: JevActionCandidate[],
+	options: { maxActions?: number; signal?: AbortSignal; client?: JevPolicyClient } = {},
+): Promise<JevActionSequenceDecision> {
+	validateCandidateIds(candidates);
+	const maxActions = Math.max(1, Math.min(8, Math.trunc(options.maxActions ?? 6)));
+	const sequence = maxActions > 1 ? compiledStableSequence(state, candidates, maxActions) : undefined;
+	if (!sequence) {
+		const decision = await selectGoalAction(state, candidates, options);
+		return {
+			decisions: [{ candidate: decision.candidate, confidence: decision.confidence, margin: decision.margin, probabilities: decision.probabilities }],
+			model: decision.model,
+			usage: decision.usage,
+			latencyMs: decision.latencyMs,
+			requestCount: decision.requestCount,
+			selectionDepth: decision.selectionDepth,
+			compiledSequence: false,
+		};
+	}
+	const probabilities = { deterministic_stable_sequence: 1 };
+	const decisions: JevActionSequenceDecision["decisions"] = sequence.map((candidate) => ({
+		candidate,
+		confidence: 1,
+		margin: 1,
+		probabilities,
+	}));
+	return {
+		decisions,
+		model: "deterministic-stable-sequence",
+		usage: { inputTokens: 0, outputTokens: 0 },
+		latencyMs: 0,
+		requestCount: 0,
+		selectionDepth: 0,
+		compiledSequence: true,
 	};
 }

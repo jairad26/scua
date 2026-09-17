@@ -82,7 +82,11 @@ denominator UI primitive rather than one tool per application.
 For autonomous work, `execute_goal` is the default high-level path. It starts
 independent cursor workers for ready tasks and gives each worker the complete
 immutable UI state as a bounded set of action-target pairs. TypeSafe Jev makes
-the fast local judgment about which pair best advances the task; SCUA—not
+the fast local judgment about which pair best advances the task. On compact,
+deterministically recognized stable control banks such as keypads, the same
+state may compile an exact literal action horizon which SCUA executes as one
+checked transaction without a model call. Dynamic navigation remains
+single-step. SCUA—not
 Jev—retains authority over ownership, state epochs, delivery, verification,
 dependencies, cancellation, and successor-state handoff. Workers progress as
 soon as their own observation or action completes rather than freezing at

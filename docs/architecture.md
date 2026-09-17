@@ -63,9 +63,9 @@ the state engine with a model. It composes a small deterministic loop:
 ```text
 observe immutable state
   -> enumerate complete action-target pairs
-  -> Jev chooses one pair with probabilities
-  -> confidence and margin gate
-  -> SCUA lease + epoch + delivery + verification
+  -> code compiles an exact bounded horizon when eligible; otherwise Jev chooses one pair
+  -> confidence and margin gate every retained position
+  -> SCUA lease + epoch + checked transaction + verification
   -> independently continue from the successor state
 ```
 
@@ -84,13 +84,25 @@ applies allowlists, application exclusions, task-count bounds, confidence and
 margin gates, wave normalization, DAG validation, and scheduling. The policy
 cannot create unknown roots, arbitrary actions, free-form objectives, or text.
 
-Jev chooses one complete pair—such as `press @e12` or `set payload title on
-@e7`—rather than independently predicting an action and a target. Large trees
+Jev chooses complete pairs—such as `press @e12` or `set payload title on
+@e7`—rather than independently predicting actions and targets. Large trees
 are not truncated to fit one Choice question: candidates are reduced through
 batched hierarchical questions, with `done`, `wait`, and `escalate` retained
 at every level. Model confidence is evidence about concentration, not proof of
 correctness, so both confidence and top-two probability margin must clear the
 configured gates before a side effect.
+
+For a small control bank which deterministic code classifies as stable within
+the same immutable root, code may compile exact ordered controls found in the
+objective into one complete sequence. Code executes that exact mapping without
+a model call; otherwise Jev chooses one ordinary action. Independently
+predicted positions are deliberately forbidden because they cannot condition
+on one another.
+SCUA delivers an accepted sequence through the ordinary `act_ui` transaction.
+The eligibility rule is intentionally narrow: compact leaf-button banks and
+literal arithmetic expressions are eligible; text entry, menus, navigation,
+dialogs, loading transitions, and consequential labels are not. Any surface
+outside that invariant remains one action per fresh successor state.
 
 Known actions and precompiled DAGs still use `act_ui` and `execute_plan`
 directly. Those are the deterministic substrate, the debugging interface, and

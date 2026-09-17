@@ -47,8 +47,11 @@ observing through a stale lease.
 task runs an independent observe → choose → act → successor loop with its own
 visual cursor. Jev receives structured task and UI state plus complete
 action-target alternatives; it never receives a generic tool socket and never
-executes a side effect. SCUA admits the selected action only after confidence
-and margin checks, then applies the same ownership, epoch, user-activity,
+executes a side effect. On stable compact control banks, deterministic code may
+compile literal ordered controls into one complete sequence. Jev is bypassed
+for that exact mapping; it never predicts mutually blind sequence positions.
+SCUA admits the retained transaction only after those checks, then applies the
+same ownership, epoch, user-activity,
 delivery, and verification rules as a direct `act_ui` call.
 
 This is intentionally asymmetric: Jev is the default autonomous decision

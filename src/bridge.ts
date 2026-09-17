@@ -2836,7 +2836,7 @@ async function dispatchUiAction(action: UiAction, target: ResolvedTarget, look: 
 	return trace;
 }
 
-async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget, look: LookResponse, headless: boolean, signal?: AbortSignal): Promise<ExecutionTrace> {
+async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget, look: LookResponse, headless: boolean, stableControlBatch = false, signal?: AbortSignal): Promise<ExecutionTrace> {
 	// Strict-headless batches have one immutable delivery class. When foreground
 	// fallback is permitted, decide independently per action so a completed
 	// background prefix is never replayed as part of a foreground batch.
@@ -2851,6 +2851,26 @@ async function dispatchUiTransaction(actions: UiAction[], target: ResolvedTarget
 		if (!result.steps || result.steps.length === 0) throw new Error("Native action transaction returned no checked steps.");
 		const execution = aggregateExecutions(result.steps.map((step) => executionTraceFromAct(step, "ax_only")));
 		const batchTrace = executionTraceFromAct(result, "ax_only");
+		execution.outcome = result.outcome;
+		execution.performed = result.performed;
+		execution.rootDelta = batchTrace.rootDelta;
+		execution.stoppedAt = result.stoppedAt;
+		return execution;
+	}
+	if (stableControlBatch && currentPlatformBackend.actBatch) {
+		if (actions.length < 2 || actions.some((action) => action.action !== "press" || !action.ref)) {
+			throw new Error("Internal stable control batches require at least two ref-backed press actions.");
+		}
+		const actionState: ActionState = { currentFocus: false };
+		const prepared = actions.map((action) => prepareUiAction(action, actionState, look, false));
+		if (prepared.some((action) => action.needsForeground || action.establishesFocus || action.usesCurrentFocus)) {
+			throw new Error("Internal stable control batch required foreground or focus-dependent delivery.");
+		}
+		const requests = prepared.map((action) => helperActRequest(target, action as NativePreparedAction, "background"));
+		const result = await currentPlatformBackend.actBatch(requests, { signal, timeoutMs: COMMAND_TIMEOUT_MS });
+		if (!result.steps || result.steps.length === 0) throw new Error("Native stable control transaction returned no checked steps.");
+		const execution = aggregateExecutions(result.steps.map((step) => executionTraceFromAct(step, "background")));
+		const batchTrace = executionTraceFromAct(result, "background");
 		execution.outcome = result.outcome;
 		execution.performed = result.performed;
 		execution.rootDelta = batchTrace.rootDelta;
@@ -3060,7 +3080,7 @@ async function performDesktopTransaction(params: ActParams, actions: UiAction[],
 	return await withWindowWriteLock(target, async () => {
 		const headless = getComputerUseConfig().headless;
 		const deliveryStartedAt = Date.now();
-		const execution = await dispatchUiTransaction(actions, target, look, headless, signal);
+		const execution = await dispatchUiTransaction(actions, target, look, headless, params.stableControlBatch === true, signal);
 		execution.evidence = {
 			...execution.evidence,
 			deliveryMs: Date.now() - deliveryStartedAt,

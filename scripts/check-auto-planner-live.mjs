@@ -28,7 +28,15 @@ const fixtureUrl = `http://127.0.0.1:${server.address().port}`;
 
 const report = { setup: {}, goal: {}, planning: {}, verification: {}, pass: false };
 try {
+	try {
+		await execFileAsync("/usr/bin/killall", ["Calculator"]);
+	} catch {
+		// Calculator may not be running before an isolated live test.
+	}
+	await new Promise((resolve) => setTimeout(resolve, 750));
 	await execFileAsync("open", ["-a", "Calculator"]);
+	await execFileAsync("osascript", ["-e", "tell application \"System Events\" to tell process \"Calculator\" to set frontmost to true"]);
+	await new Promise((resolve) => setTimeout(resolve, 1_000));
 	await withScuaMcpClient({
 		root,
 		actorId: `auto-planner-live-${process.pid}`,
@@ -40,22 +48,14 @@ try {
 	}, async (client) => {
 		const browser = await client.call("open_root", { kind: "browser_page", url: fixtureUrl }, 60_000);
 		const calculatorRoots = await client.call("find_roots", { app: "Calculator" });
-		const calculator = calculatorRoots.details.windows.find((candidate) => candidate.app === "Calculator");
+		const calculator = calculatorRoots.details.windows.find((candidate) => candidate.app === "Calculator" && candidate.pairing?.confidence === "exact")
+			?? calculatorRoots.details.windows.find((candidate) => candidate.app === "Calculator" && candidate.kind === "window" && candidate.windowId > 0);
 		assert(calculator?.windowRef, "Calculator root was not discovered.");
 		const browserRoot = browser.details.root.ref;
-		const calculatorState = await client.call("observe_ui", { root: calculator.windowRef, mode: "semantic" });
-		const clearButton = await client.call("search_ui", { stateId: calculatorState.details.capture.stateId, text: "Clear", role: "button", capability: "press" });
-		assert(clearButton.details.matches[0]?.ref, "Calculator Clear button was not discovered.");
-		const cleared = await client.call("act_ui", {
-			stateId: calculatorState.details.capture.stateId,
-			actions: [{ action: "press", ref: clearButton.details.matches[0].ref }],
-			expect: { role: "statictext", text: "0", timeoutMs: 3_000 },
-		});
-		assert(["verified", "preexisting"].includes(cleared.details.execution.verification.status), "Calculator did not reset to zero before the test.");
-		report.setup = { calculator: "0", browser: "Status: idle" };
+		report.setup = { calculator: "isolated process", browser: "Status: idle" };
 		const startedAt = performance.now();
 		const result = await client.call("execute_goal", {
-			goal: "Complete both independent parts: in the browser press Complete task until the page says Status: complete; in Calculator clear it and calculate 12 + 30 so the display is 42. Do not use any other application.",
+			goal: "Complete both independent parts: in the browser press Complete task until the page says Status: complete; in Calculator calculate 12 + 30 so the display is 42. Do not use any other application.",
 			planning: {
 				mode: "automatic",
 				roots: [browserRoot, calculator.windowRef],
@@ -69,7 +69,16 @@ try {
 			status: result.details.status,
 			durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
 			peakConcurrency: result.details.peakConcurrency,
-			taskStatuses: result.details.tasks.map((task) => ({ id: task.id, status: task.status, durationMs: task.durationMs })),
+			taskStatuses: result.details.tasks.map((task) => ({
+				id: task.id,
+				status: task.status,
+				durationMs: task.durationMs,
+				transactions: task.steps.length,
+				maxActionBatch: Math.max(0, ...task.steps.map((step) => step.microBatch?.executedCount ?? 0)),
+				jevLatencyMs: Math.round(task.steps.reduce((sum, step) => sum + step.jevLatencyMs, 0) * 10) / 10,
+				initialObservationMs: task.initialObservationMs,
+				actLatencyMs: Math.round(task.steps.reduce((sum, step) => sum + (step.actLatencyMs ?? 0), 0) * 10) / 10,
+			})),
 		};
 		report.planning = result.details.planning;
 		if (result.details.status !== "succeeded") console.error(JSON.stringify({ text: result.text, details: result.details }, null, 2));
@@ -82,6 +91,7 @@ try {
 		const calculatorTaskId = result.details.planning.selected.find((task) => task.root === calculator.windowRef).taskId;
 		const browserTask = result.details.tasks.find((task) => task.id === browserTaskId);
 		const calculatorTask = result.details.tasks.find((task) => task.id === calculatorTaskId);
+		assert(calculatorTask.steps.some((step) => step.microBatch?.executedCount === 6), "Calculator expression did not use one six-action stable transaction");
 		const [browserEvidence, calculatorEvidence] = await Promise.all([
 			client.call("search_ui", { stateId: browserTask.finalStateId, text: "Status: complete" }),
 			client.call("search_ui", { stateId: calculatorTask.finalStateId, text: "42", role: "statictext" }),

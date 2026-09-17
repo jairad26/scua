@@ -127,7 +127,8 @@ const goalTask = object({
 	root: string("Exact @r root reference. Omit root/stateId/stateFrom only for a single frontmost-root task."),
 	stateId,
 	stateFrom: string("Successful predecessor task whose final immutable state becomes this task's input."),
-	maxSteps: number("Maximum Jev decisions and actions for this worker.", { minimum: 1, maximum: 30, default: 12 }),
+	maxSteps: number("Maximum observe/decide/act transactions for this worker.", { minimum: 1, maximum: 30, default: 12 }),
+	maxBatchActions: number("Maximum stable same-state presses SCUA may compile into one transaction. Ordinary dynamic UI remains single-step.", { minimum: 1, maximum: 8, default: 6 }),
 	completion: condition,
 	textValues: { type: "object", description: "Named text payloads the policy may select for editable fields.", additionalProperties: { type: "string" } },
 	context: { type: "object", description: "Small JSON context supplied to this task's policy decisions.", additionalProperties: true },
@@ -175,7 +176,7 @@ export const mcpTools: McpToolDefinition[] = [
 	tool(
 		"execute_goal",
 		"Execute autonomous goal",
-		"Run a Jev-first autonomous goal over one or more independently scheduled cursor workers. Callers may provide an explicit task graph or opt into bounded automatic planning, where Jev assigns eligible roots to typed roles and dependency waves before deterministic validation. Each worker then selects one complete action-target pair from immutable SCUA state; leases, epochs, actions, verification, dependencies, and handoffs remain enforced by SCUA. Low-confidence or unsupported decisions fail closed as escalations.",
+		"Run a Jev-first autonomous goal over one or more independently scheduled cursor workers. Callers may provide an explicit task graph or opt into bounded automatic planning, where Jev assigns eligible roots to typed roles and dependency waves before deterministic validation. Each worker selects complete action-target pairs from immutable SCUA state; exact literal actions on stable control banks may compile into one transaction while dynamic UI remains single-step. Leases, epochs, actions, verification, dependencies, and handoffs remain enforced by SCUA. Low-confidence or unsupported decisions fail closed as escalations.",
 		object({
 			goal: string("Overall goal shared by all workers."),
 			tasks: { type: "array", items: goalTask, minItems: 1, maxItems: 32 },

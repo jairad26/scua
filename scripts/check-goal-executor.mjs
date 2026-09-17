@@ -87,6 +87,40 @@ assert.equal(decisionStates.some((state) => state.ui.semanticFacts.some((fact) =
 assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.description?.target?.label === "Continue")), true, "recent action history retained only an unstable candidate ID");
 assert.equal(decisionStates.some((state) => state.recentActions.some((action) => action.summary === "press \"Continue\" -> worked")), true, "recent action history omitted its human-readable ordered summary");
 
+const batchedActionCounts = [];
+const batched = createGoalExecutor({
+	observe: async () => result("batch"),
+	act: async (_id, params) => {
+		batchedActionCounts.push(params.actions.length);
+		return result("batch-next", {
+			outcome: "worked",
+			actionCount: params.actions.length,
+			steps: params.actions.map(() => ({ outcome: "worked", verification: { status: "verified" } })),
+			verification: { status: "verified" },
+		});
+	},
+	decideSequence: async (state, candidates) => {
+		const candidate = state.recentActions.length
+			? candidates.find((item) => item.kind === "done")
+			: candidates.find((item) => item.kind === "action");
+		const selected = { candidate, confidence: 0.96, margin: 0.85, probabilities: { [candidate.id]: 0.96 } };
+		return {
+			decisions: state.recentActions.length ? [selected] : [selected, selected, selected],
+			model: "fake-jev",
+			usage: { inputTokens: 7, outputTokens: 3 },
+			latencyMs: 2,
+			requestCount: 1,
+			selectionDepth: 1,
+			compiledSequence: !state.recentActions.length,
+		};
+	},
+});
+const batchedRun = await batched("batch", { goal: "Press three stable controls", tasks: [{ id: "bank" }] }, undefined, {});
+assert.equal(batchedRun.details.status, "succeeded");
+assert.deepEqual(batchedActionCounts, [3], "compiled actions were not delivered as one act_ui transaction");
+assert.equal(batchedRun.details.tasks[0].steps[0].microBatch.plannedCount, 3);
+assert.equal(batchedRun.details.tasks[0].steps[0].microBatch.executedCount, 3);
+
 observedParams.length = 0;
 const handoff = await execute("handoff", {
 	goal: "Complete a two-stage workflow",

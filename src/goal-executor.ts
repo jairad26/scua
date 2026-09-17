@@ -6,7 +6,9 @@ import { outlineNodeLabel, restoreOutline, type Outline, type OutlineNode, type 
 import {
 	planGoalTaskGraph,
 	selectGoalAction,
+	selectGoalActionSequence,
 	type JevActionCandidate,
+	type JevActionSequenceDecision,
 	type JevDecision,
 	type JevDecisionState,
 	type JevPlanningRoot,
@@ -23,6 +25,7 @@ export interface GoalExecutorAdapter {
 	observe(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ToolResult>;
 	act(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ToolResult>;
 	decide?(state: JevDecisionState, candidates: JevActionCandidate[], signal?: AbortSignal): Promise<JevDecision>;
+	decideSequence?(state: JevDecisionState, candidates: JevActionCandidate[], options: { maxActions: number; signal?: AbortSignal }): Promise<JevActionSequenceDecision>;
 	plan?(goal: string, roots: JevPlanningRoot[], options: { maxWaves: number; maxTasks: number; signal?: AbortSignal }): Promise<JevTaskPlanDecision>;
 }
 
@@ -37,6 +40,7 @@ export interface GoalTaskTrace {
 	completedAt: number;
 	durationMs: number;
 	initialStateId?: string;
+	initialObservationMs?: number;
 	finalStateId?: string;
 	resourceKey?: string;
 	steps: GoalStepTrace[];
@@ -54,6 +58,7 @@ export interface GoalStepTrace {
 	margin: number;
 	model: string;
 	jevLatencyMs: number;
+	actLatencyMs?: number;
 	requestCount: number;
 	selectionDepth: number;
 	usage: JevDecision["usage"];
@@ -61,6 +66,12 @@ export interface GoalStepTrace {
 	outcome?: string;
 	verification?: string;
 	successorStateId?: string;
+	microBatch?: {
+		compiled: boolean;
+		plannedCount: number;
+		executedCount: number;
+		choices: string[];
+	};
 }
 
 function traceAction(action: UiAction | undefined): Record<string, unknown> | undefined {
@@ -312,6 +323,34 @@ function candidateDescription(node: OutlineNode, operation: string, extra: Recor
 	};
 }
 
+const MICRO_BATCH_RISK_LABEL = /\b(?:accept|allow|apply|authorize|book|buy|checkout|close|confirm|decline|delete|deny|install|log\s*out|order|pay|post|publish|purchase|quit|remove|save|send|share|sign\s*out|submit|transfer|uninstall)\b/i;
+const MICRO_BATCH_WORD_LABELS = new Set([
+	"add", "all clear", "backspace", "clear", "decimal", "divide", "equals", "minus", "multiply", "percent", "plus", "subtract",
+]);
+
+function compactStableControl(node: OutlineNode): boolean {
+	if (!node.canPress || node.offscreen || node.children.length > 0) return false;
+	if (!normalizedRole(node.role).includes("button")) return false;
+	const label = safeLabel(node).normalize("NFKC").replace(/\s+/g, " ").trim();
+	if (!label || MICRO_BATCH_RISK_LABEL.test(label)) return false;
+	const normalizedLabel = label.toLowerCase();
+	return /^[\p{N}\p{S}\p{P}\s]{1,6}$/u.test(label)
+		|| /^(?:ac|c|ce)$/i.test(label)
+		|| MICRO_BATCH_WORD_LABELS.has(normalizedLabel);
+}
+
+/** Stable control banks are compact leaf-button groups such as keypads and
+ * calculators. We intentionally exclude ordinary navigation/action buttons:
+ * stale retained controls must never become a compiled click-through path. */
+function microBatchStable(node: OutlineNode): boolean {
+	if (!compactStableControl(node)) return false;
+	let ancestor = node.parent;
+	for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parent) {
+		if (descendants(ancestor).filter(compactStableControl).length >= 4) return true;
+	}
+	return false;
+}
+
 export function buildGoalCandidates(outline: Outline, task: GoalTask): JevActionCandidate[] {
 	const candidates: JevActionCandidate[] = [];
 	let actionIndex = 0;
@@ -320,7 +359,10 @@ export function buildGoalCandidates(outline: Outline, task: GoalTask): JevAction
 	};
 	for (const node of outline.nodes) {
 		if (!node.ref) continue;
-		if (node.canPress) add({ action: "press", ref: node.ref }, candidateDescription(node, "press"));
+		if (node.canPress) {
+			const candidate: JevActionCandidate = { id: `a${actionIndex++}`, kind: "action", action: { action: "press", ref: node.ref }, description: candidateDescription(node, "press") as JevActionCandidate["description"], microBatchStable: microBatchStable(node) };
+			candidates.push(candidate);
+		}
 		else if (node.canFocus && node.rect) add({ action: "click", ref: node.ref }, candidateDescription(node, "click_to_focus"));
 		if (node.actions.some((action) => action.toLowerCase().includes("select"))) {
 			add({ action: "select", ref: node.ref }, candidateDescription(node, "select"));
@@ -525,7 +567,9 @@ async function runGoalTask(
 		const initialParams = inheritedStateId || task.stateId
 			? { stateId: inheritedStateId ?? task.stateId, mode: "semantic" }
 			: task.root ? { root: task.root, mode: "semantic" } : { mode: "semantic" };
+		const observationStartedAt = performance.now();
 		let observation = await adapter.observe(`${toolCallId}_${task.id}_observe`, initialParams, signal, ctx);
+		base.initialObservationMs = Math.round((performance.now() - observationStartedAt) * 10) / 10;
 		let stateId = stateIdFrom(observation);
 		let serialized = outlineFrom(observation);
 		if (!stateId || !serialized) throw new Error(`Task '${task.id}' did not receive a complete immutable observation.`);
@@ -550,9 +594,26 @@ async function runGoalTask(
 				dependencies: taskDependencyContext(task, results),
 				recentActions: recentActions.slice(-6),
 			};
-			const decision = adapter.decide
-				? await adapter.decide(policyState, candidates, signal)
-				: await selectGoalAction(policyState, candidates, { signal });
+			const maxBatchActions = boundedInteger(task.maxBatchActions, 6, 1, 8);
+			let sequence: JevActionSequenceDecision;
+			if (adapter.decideSequence) {
+				sequence = await adapter.decideSequence(policyState, candidates, { maxActions: maxBatchActions, signal });
+			} else if (adapter.decide) {
+				const decision = await adapter.decide(policyState, candidates, signal);
+				sequence = {
+					decisions: [{ candidate: decision.candidate, confidence: decision.confidence, margin: decision.margin, probabilities: decision.probabilities }],
+					model: decision.model,
+					usage: decision.usage,
+					latencyMs: decision.latencyMs,
+					requestCount: decision.requestCount,
+					selectionDepth: decision.selectionDepth,
+					compiledSequence: false,
+				};
+			} else {
+				sequence = await selectGoalActionSequence(policyState, candidates, { maxActions: maxBatchActions, signal });
+			}
+			const decision = sequence.decisions[0];
+			if (!decision) throw new Error("Jev returned an empty action sequence.");
 			const stepTrace: GoalStepTrace = {
 				step,
 				stateId,
@@ -561,11 +622,11 @@ async function runGoalTask(
 				kind: decision.candidate.kind,
 				confidence: decision.confidence,
 				margin: decision.margin,
-				model: decision.model,
-				jevLatencyMs: decision.latencyMs,
-				requestCount: decision.requestCount,
-				selectionDepth: decision.selectionDepth,
-				usage: decision.usage,
+				model: sequence.model,
+				jevLatencyMs: sequence.latencyMs,
+				requestCount: sequence.requestCount,
+				selectionDepth: sequence.selectionDepth,
+				usage: sequence.usage,
 				action: traceAction(decision.candidate.action),
 			};
 			base.steps.push(stepTrace);
@@ -588,25 +649,45 @@ async function runGoalTask(
 				const completedAt = Date.now();
 				return { ...base, status: "escalated", finalStateId: stateId, completedAt, durationMs: completedAt - startedAt, escalation: { reason: "Jev explicitly requested higher-level reasoning.", confidence: decision.confidence, margin: decision.margin } };
 			}
+			const executable = [] as typeof sequence.decisions;
+			for (const selected of sequence.decisions) {
+				if (selected.confidence < thresholds.minConfidence || selected.margin < thresholds.minMargin || !selected.candidate.action) break;
+				executable.push(selected);
+			}
+			if (!executable.length) throw new Error("Jev sequence passed its first gate but contained no executable action.");
+			stepTrace.microBatch = {
+				compiled: sequence.compiledSequence,
+				plannedCount: sequence.decisions.length,
+				executedCount: 0,
+				choices: executable.map((selected) => selected.candidate.id),
+			};
+			const actionStartedAt = performance.now();
 			const actionResult = await runAsVisualAgent(visualAgentId, async () => await adapter.act(
 				`${toolCallId}_${task.id}_${step}`,
-				{ stateId, actions: [decision.candidate.action] },
+				{ stateId, actions: executable.map((selected) => selected.candidate.action), stableControlBatch: sequence.compiledSequence && executable.length > 1 },
 				signal,
 				ctx,
 			));
+			stepTrace.actLatencyMs = Math.round((performance.now() - actionStartedAt) * 10) / 10;
 			const execution = actionResult.details?.execution;
 			stepTrace.outcome = execution?.outcome;
 			stepTrace.verification = execution?.verification?.status;
+			const executedCount = Math.max(0, Math.min(executable.length, Number(execution?.actionCount ?? execution?.steps?.length ?? executable.length)));
+			stepTrace.microBatch.executedCount = executedCount;
 			const successorStateId = stateIdFrom(actionResult);
 			stepTrace.successorStateId = successorStateId;
+			for (let index = 0; index < executedCount; index += 1) {
+				const selected = executable[index];
+				const actionExecution = execution?.steps?.[index] ?? execution;
 				recentActions.push({
-				choice: stepTrace.choice,
-				kind: stepTrace.kind,
-				summary: actionSummary(decision.candidate, stepTrace.outcome),
-				description: decision.candidate.description,
-				outcome: stepTrace.outcome,
-				verification: stepTrace.verification,
-			});
+					choice: selected.candidate.id,
+					kind: selected.candidate.kind,
+					summary: actionSummary(selected.candidate, actionExecution?.outcome),
+					description: selected.candidate.description,
+					outcome: actionExecution?.outcome,
+					verification: actionExecution?.verification?.status,
+				});
+			}
 			if (execution?.outcome === "didnt" || execution?.verification?.status === "failed") {
 				// The successor still carries useful evidence. Let Jev choose a different
 				// action on the next step instead of blindly retrying this one.

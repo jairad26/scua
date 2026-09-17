@@ -178,6 +178,13 @@ and `escalate` are explicit policy choices;
 reaching the per-task step budget also escalates. SCUA does not silently invoke
 a larger model or ask another worker to improvise.
 
+Each goal task also accepts `maxBatchActions` from 1 through 8 (default 6).
+This is a ceiling, not a request to click ahead blindly. SCUA only compiles an
+exact literal horizon on stable compact control banks and sends the sequence
+through one `act_ui` transaction; ambiguous choices still go through Jev.
+Set it to 1 for deterministic single-step diagnostics. All dynamic interfaces
+remain single-step regardless of the ceiling.
+
 On macOS, credentials resolve from the `TYPESAFE_API_KEY` environment variable,
 the `ai.typesafe.scua` Keychain service, or AWS Secrets Manager. The AWS secret
 defaults to ID `TYPESAFE_API_KEY` and JSON key `TYPESAFE_API_KEY`.

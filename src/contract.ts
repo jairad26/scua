@@ -93,6 +93,8 @@ export interface UiAction {
 
 export interface ActParams extends StateTargetParams {
 	actions: UiAction[];
+	/** Internal execute_goal hint. Not exposed by the MCP schema. */
+	stableControlBatch?: boolean;
 	/** Live predicates checked while the resource lease is held and before its
 	 * epoch advances. A failed guard proves that no action was delivered. */
 	guards?: UiCondition[];
@@ -137,7 +139,10 @@ export interface GoalTask {
 	stateId?: string;
 	/** Start from the successful final state of this dependency. */
 	stateFrom?: string;
+	/** Maximum observe/decide/act transactions for this worker. */
 	maxSteps?: number;
+	/** Maximum stable same-state actions SCUA may compile into one transaction. */
+	maxBatchActions?: number;
 	/** Deterministic success condition checked before every Jev decision. */
 	completion?: UiCondition;
 	/** Named text payloads Jev may select without receiving the secret/content
